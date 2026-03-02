@@ -243,12 +243,17 @@ class VisualVerifyConfig(BaseModel):
     viewport_height: int = 720
 
 class RalphConfig(BaseModel):
-    """Root configuration loaded from ralph-config.yaml."""
-    progress_file: str = "PROGRESS.yaml"
-    task_dir: str = "tasks/"
+    """Root configuration loaded from a global config file."""
+    # Runtime paths are resolved per loop directory by load(..., loop_dir=...):
+    #   progress_file -> <loop_dir>/PROGRESS.yaml
+    #   task_dir -> <loop_dir>/tasks/
+    #   pause_file -> <loop_dir>/PAUSE.md
+    #   workspace_dir -> <loop_dir>/product/
+    progress_file: str
+    task_dir: str
     max_retries: int = 3
-    pause_file: str = "PAUSE.md"
-    workspace_dir: str = "."                # Resolved at runtime, defaults to CWD
+    pause_file: str
+    workspace_dir: str
 
     backends: dict[str, BackendConfig]      # Keys: "coder", "inspector", "visual"
     verify_commands: list[str] = Field(default_factory=list)  # Default verify commands
@@ -258,8 +263,8 @@ class RalphConfig(BaseModel):
     project_instructions: str | None = None
 
     @classmethod
-    def load(cls, path: str) -> RalphConfig:
-        """Load config from YAML file, resolve relative paths."""
+    def load(cls, path: str, *, loop_dir: str | None = None) -> RalphConfig:
+        """Load global defaults and resolve runtime paths for a loop directory."""
         ...
 
     def get_backend(self, role: str) -> BackendConfig:
@@ -924,8 +929,8 @@ The `ralph-loop` bash script is the primary user-facing entry point. It:
 #!/bin/bash
 # ralph-loop — Host orchestrator for AI coding loops
 # Usage: ./ralph-loop <command> [options]
-#   ./ralph-loop run    --config ralph-config.yaml
-#   ./ralph-loop status --config ralph-config.yaml
+#   CONFIG=~/.config/ralph-loop/config.yaml LOOP_DIR=.ralph-loop/my-loop ./ralph-loop run
+#   CONFIG=~/.config/ralph-loop/config.yaml LOOP_DIR=.ralph-loop/my-loop ./ralph-loop status
 #   ./ralph-loop init   --from plan.md
 # 
 # This script dispatches work to Docker containers.
@@ -936,6 +941,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RALPH_TMP=".ralph-tmp"
 CONFIG="${CONFIG:-ralph-config.yaml}"
+LOOP_DIR="${LOOP_DIR:-.}"
 DOCKER_USER="$(id -u):$(id -g)"
 
 # ── Color output ──

@@ -1,8 +1,4 @@
-progress_file: ../tmp/PROGRESS.yaml
-task_dir: ../tmp/tasks/
 max_retries: 3
-pause_file: ../tmp/PAUSE.md
-workspace_dir: ../tmp/product
 
 backends:
   coder:
@@ -30,11 +26,9 @@ backends:
       - "@/workspace/example/copilot-mcp.chrome.json"
 
 verify_commands:
-  - "python -m pytest -q ./tmp/product/tests"
+  - "python -m pytest -q tests"
 
 auth:
   copilot:
     env: []
     mount: ["~/.config/gh"]
-
-project_instructions: ../AGENTS.md

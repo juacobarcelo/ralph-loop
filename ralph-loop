@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RALPH_TMP=".ralph-tmp"
 CONFIG="${CONFIG:-ralph-config.yaml}"
+LOOP_DIR="${LOOP_DIR:-.}"
 DOCKER_USER="$(id -u):$(id -g)"
 SOURCE_EPOCH_CACHE=""
 
@@ -190,10 +191,11 @@ cmd_run() {
     rm -rf "$RALPH_TMP"
     mkdir -p "$RALPH_TMP"
     log_info "Using config: $CONFIG"
+    log_info "Using loop dir: $LOOP_DIR"
     log_info "Starting ralph loop..."
 
     while true; do
-        run_base next-action --config "/workspace/$CONFIG" --step-result "/workspace/$RALPH_TMP/step-result.json" > "$RALPH_TMP/next-action.json"
+        run_base next-action --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR" --step-result "/workspace/$RALPH_TMP/step-result.json" > "$RALPH_TMP/next-action.json"
         COMMAND=$(jq -r '.command' "$RALPH_TMP/next-action.json")
         TASK_ID=$(jq -r '.task_id // "n/a"' "$RALPH_TMP/next-action.json")
         log_info "Next action: $COMMAND (task: $TASK_ID)"
@@ -276,6 +278,7 @@ cmd_run() {
                 set +e
                 run_cli "$IMAGE" visual \
                     --config "/workspace/$CONFIG" \
+                    --loop-dir "/workspace/$LOOP_DIR" \
                     --task-id "$TASK_ID" \
                     "${BACKEND_ARGS[@]}" \
                     > >(tee "$VISUAL_STDOUT_FILE") \
@@ -288,7 +291,7 @@ cmd_run() {
                 ;;
             update)
                 log_info "Task $TASK_ID: updating progress..."
-                run_base update --config "/workspace/$CONFIG" --result-dir "/workspace/$RALPH_TMP/"
+                run_base update --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR" --result-dir "/workspace/$RALPH_TMP/"
                 ;;
             done)
                 REASON=$(jq -r '.reason // "all_completed"' "$RALPH_TMP/next-action.json")
@@ -314,7 +317,7 @@ cmd_run() {
 
 cmd_status() {
     ensure_image "base"
-    run_base status --config "/workspace/$CONFIG"
+    run_base status --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR"
 }
 
 cmd_init() {
@@ -324,7 +327,7 @@ cmd_init() {
 
 cmd_validate() {
     ensure_image "base"
-    run_base validate --config "/workspace/$CONFIG"
+    run_base validate --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR"
 }
 
 cmd_build_images() {

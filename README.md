@@ -79,10 +79,10 @@ Check progress:
 
 ```bash
 # Run directly (AI CLIs must be installed on host)
-uvx ralph-loop run --config ralph-config.yaml
+uvx ralph-loop run
 
 # Run with Docker sandbox for AI CLIs
-uvx ralph-loop run --config ralph-config.yaml --sandbox docker
+uvx ralph-loop run --sandbox docker
 ```
 
 ### Execution Modes
@@ -116,17 +116,20 @@ Write a markdown file describing what you want to build:
 ./ralph-loop init --from plan.md
 ```
 
-This creates task files in `tasks/` and a `PROGRESS.yaml` tracking file. It uses an AI backend to decompose your plan into structured, actionable tasks — or falls back to a deterministic parser if no backend is available.
+This creates a dedicated loop directory next to the plan:
+
+- `.ralph-loop/<plan-slug>/tasks/`
+- `.ralph-loop/<plan-slug>/PROGRESS.yaml`
+- `.ralph-loop/<plan-slug>/product/`
+
+It uses an AI backend to decompose your plan into structured, actionable tasks — or falls back to a deterministic parser if no backend is available.
 
 ### 3. Configure backends
 
-Create or edit `ralph-config.yaml`:
+Create or edit global config (`$RALPH_CONFIG` or `~/.config/ralph-loop/config.yaml`):
 
 ```yaml
-progress_file: PROGRESS.yaml
-task_dir: tasks/
 max_retries: 3
-pause_file: PAUSE.md
 
 backends:
   coder:
@@ -154,7 +157,7 @@ auth:
 ### 4. Run the loop
 
 ```bash
-./ralph-loop run
+CONFIG=~/.config/ralph-loop/config.yaml LOOP_DIR=.ralph-loop/my-project-plan ./ralph-loop run
 ```
 
 ralph-loop will work through each task, coding → verifying → retrying until all tasks are complete or aborted.
@@ -162,7 +165,7 @@ ralph-loop will work through each task, coding → verifying → retrying until 
 ### 5. Monitor progress
 
 ```bash
-./ralph-loop status
+CONFIG=~/.config/ralph-loop/config.yaml LOOP_DIR=.ralph-loop/my-project-plan ./ralph-loop status
 ```
 
 ```
@@ -181,9 +184,9 @@ Progress: 1/4 completed, 1 in progress, 2 not started
 
 ---
 
-## E2E Example (Copilot + `./tmp`)
+## E2E Example (Copilot + loop directory)
 
-Use the committed example design in `example/` and keep all generated cycle state under `./tmp/`.
+Use the committed example design in `example/` and let `init` create the loop directory automatically.
 
 ### Prerequisites
 
@@ -200,14 +203,7 @@ docker build --target copilot -t ralph-loop-copilot .
 gh auth status
 ```
 
-### 1. Prepare temporary workspace
-
-```bash
-rm -rf ./tmp
-mkdir -p ./tmp/product
-```
-
-### 2. Generate tasks and progress into `./tmp/`
+### 1. Generate tasks and progress
 
 ```bash
 ./ralph-loop init \
@@ -217,21 +213,22 @@ mkdir -p ./tmp/product
 
 This creates:
 
-- `./tmp/PROGRESS.yaml`
-- `./tmp/tasks/*.md`
+- `./example/.ralph-loop/copilot-e2e-plan/PROGRESS.yaml`
+- `./example/.ralph-loop/copilot-e2e-plan/tasks/*.md`
+- `./example/.ralph-loop/copilot-e2e-plan/product/`
 
-### 3. Validate and run the cycle
+### 2. Validate and run the cycle
 
 ```bash
-CONFIG=example/ralph-config.copilot.yaml ./ralph-loop validate
-CONFIG=example/ralph-config.copilot.yaml ./ralph-loop run
-CONFIG=example/ralph-config.copilot.yaml ./ralph-loop status
+CONFIG=example/ralph-config.copilot.yaml LOOP_DIR=example/.ralph-loop/copilot-e2e-plan ./ralph-loop validate
+CONFIG=example/ralph-config.copilot.yaml LOOP_DIR=example/.ralph-loop/copilot-e2e-plan ./ralph-loop run
+CONFIG=example/ralph-config.copilot.yaml LOOP_DIR=example/.ralph-loop/copilot-e2e-plan ./ralph-loop status
 ```
 
-The generated product and tests are written under `./tmp/product/`, and deterministic verification runs with:
+The generated product and tests are written under `./example/.ralph-loop/copilot-e2e-plan/product/`, and deterministic verification runs with:
 
 ```bash
-python -m pytest -q ./tmp/product/tests
+python -m pytest -q tests
 ```
 
 ---

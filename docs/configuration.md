@@ -1,30 +1,40 @@
 # Configuration Reference
 
+## Scope
+
+`ralph-loop` now treats config as **global defaults** (engines, auth, retries, default verification).
+
+Runtime files are resolved from a loop directory (`--loop-dir`, default `.`):
+
+- `progress_file`: `<loop_dir>/PROGRESS.yaml`
+- `task_dir`: `<loop_dir>/tasks/`
+- `pause_file`: `<loop_dir>/PAUSE.md`
+- `workspace_dir`: `<loop_dir>/product/`
+
+You can still provide any of these paths explicitly in YAML to override the convention.
+
 ## Required
 
-- `progress_file`: Path to `PROGRESS.yaml`
-- `task_dir`: Directory containing task markdown files
 - `backends`: Backend configuration for at least `coder`
 
 ## Optional
 
 - `max_retries` (default `3`)
-- `pause_file` (default `PAUSE.md`)
-- `workspace_dir` (default current workspace)
 - `verify_commands` (default `[]`)
-- `project_instructions` (optional path to `AGENTS.md`/`CLAUDE.md`)
+- `project_instructions` (optional explicit path; if omitted, auto-detected from loop dir ancestors: `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`)
 - `auth` map (`codex`, `copilot`, `claude`) with:
   - `env`: list of env vars to forward in Docker mode
   - `mount`: list of host paths to mount inside backend containers
 
+## Config location
+
+- CLI default: `$RALPH_CONFIG` when set, otherwise `~/.config/ralph-loop/config.yaml`
+- Override per command with `--config`
+
 ## Example
 
 ```yaml
-progress_file: PROGRESS.yaml
-task_dir: tasks/
 max_retries: 3
-pause_file: PAUSE.md
-workspace_dir: .
 
 backends:
   coder:

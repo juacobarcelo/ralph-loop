@@ -288,6 +288,55 @@ def test_init_creates_target_directories_when_missing(sample_workspace: Path, mo
     assert progress_file.exists()
 
 
+def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+
+    config_path = tmp_path / "global-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "max_retries": 3,
+                "backends": {
+                    "coder": {"engine": "codex", "timeout_seconds": 60},
+                    "inspector": {"engine": "copilot", "timeout_seconds": 60},
+                },
+                "verify_commands": [],
+                "auth": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class _UnavailableBackend:
+        def is_available(self) -> bool:
+            return False
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+
+    plan_path = workspace / "my-feature-plan.md"
+    plan_path.write_text("# Plan\n- [ ] Setup project", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    loop_dir = workspace / ".ralph-loop" / "my-feature-plan"
+    assert (loop_dir / "tasks" / "01-setup-project.md").exists()
+    assert (loop_dir / "PROGRESS.yaml").exists()
+    assert (loop_dir / "product").exists()
+
+
 def test_next_action_and_update_flow(sample_workspace: Path, monkeypatch) -> None:
     config_path = sample_workspace / "ralph-config.yaml"
     progress_path = sample_workspace / "PROGRESS.yaml"

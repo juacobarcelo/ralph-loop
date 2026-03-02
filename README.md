@@ -178,6 +178,15 @@ It uses an AI backend to decompose your plan into structured, actionable tasks â
 2. Source plan (`--from`)
 3. User directives (`--instructions-file`, then `--instructions`)
 
+`init` also resolves its backend role with this precedence:
+
+1. `backends.init`
+2. `backends.initialize`
+3. `backends.inspector`
+4. `backends.coder`
+
+You can still override per command with `--backend` and `--model`.
+
 Use directives to control generated task metadata, not only prose. The generator should emit tasks with
 frontmatter-compatible fields that drive the loop:
 
@@ -207,6 +216,10 @@ Create or edit global config (`$RALPH_CONFIG` or `~/.config/ralph-loop/config.ya
 max_retries: 3
 
 backends:
+  init:
+    engine: copilot
+    model: claude-opus-4-6
+    timeout_seconds: 300
   coder:
     engine: codex
     model: gpt-5.3-codex

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ralph_loop.backends import get_backend
 from ralph_loop.config import (
+    BackendConfig,
     ConfigNotFoundError,
     RalphConfig,
     VisualVerifyConfig,
@@ -751,6 +752,16 @@ def _ensure_init_directories(config: RalphConfig) -> None:
         seen.add(resolved)
 
 
+def _select_init_backend(config: RalphConfig) -> BackendConfig:
+    if "init" in config.backends:
+        return config.get_backend("init")
+    if "initialize" in config.backends:
+        return config.get_backend("initialize")
+    if "inspector" in config.backends:
+        return config.get_backend("inspector")
+    return config.get_backend("coder")
+
+
 def _generate_plan_with_backend(
     *,
     config: RalphConfig,
@@ -758,11 +769,7 @@ def _generate_plan_with_backend(
     backend_override: str | None,
     model_override: str | None,
 ) -> GeneratedPlan | None:
-    role_backend = (
-        config.get_backend("inspector")
-        if "inspector" in config.backends
-        else config.get_backend("coder")
-    )
+    role_backend = _select_init_backend(config)
     engine = backend_override or role_backend.engine
     model = model_override or role_backend.model
 
@@ -954,6 +961,24 @@ def list_engines_command(config_path: str) -> None:
     engines = sorted({backend.engine for backend in config.backends.values()})
     for engine in engines:
         click.echo(engine)
+
+
+@main.command("init-engine")
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+def init_engine_command(config_path: str) -> None:
+    """Print the engine used by `init` plan generation."""
+    config = _load_config(config_path)
+    role_backend = _select_init_backend(config)
+    click.echo(role_backend.engine)
+
+
+@main.command("auth-config")
+@click.option("--engine", required=True)
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+def auth_config_command(engine: str, config_path: str) -> None:
+    """Print auth forwarding config for an engine as JSON."""
+    config = _load_config(config_path)
+    click.echo(json.dumps(config.get_auth(engine).model_dump()))
 
 
 @main.command("validate")
@@ -1490,11 +1515,7 @@ def init_command(
         click.echo("[init] Applying additional user directives.")
     prompt = _build_prompt(source_content, config, user_directives)
 
-    role_backend = (
-        config.get_backend("inspector")
-        if "inspector" in config.backends
-        else config.get_backend("coder")
-    )
+    role_backend = _select_init_backend(config)
     selected_engine = backend or role_backend.engine
     selected_model = model or role_backend.model
     if selected_model:

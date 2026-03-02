@@ -40,6 +40,40 @@ def test_validate_command(sample_workspace: Path) -> None:
     assert "Validation passed." in result.output
 
 
+def test_init_engine_prefers_init_role(sample_workspace: Path) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["backends"]["init"] = {
+        "engine": "claude",
+        "model": "claude-opus-4-6",
+        "timeout_seconds": 120,
+    }
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["init-engine", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "claude"
+
+
+def test_init_engine_accepts_initialize_alias(sample_workspace: Path) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["backends"]["initialize"] = {
+        "engine": "claude",
+        "model": "claude-opus-4-6",
+        "timeout_seconds": 120,
+    }
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["init-engine", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "claude"
+
+
 def test_init_command_generates_files_with_backend_output(
     sample_workspace: Path, monkeypatch
 ) -> None:

@@ -9,6 +9,33 @@ Ships with 3 backends — **Codex**, **GitHub Copilot**, and **Claude Code** —
 
 ---
 
+## Root Config Workflow (Init → Run)
+
+If your `ralph-config.yaml` is in the repository root, and your plan is under `PRD/...`, run from repo root like this:
+
+```bash
+# 1) Initialize tasks/progress from a plan
+./ralph-loop init --from PRD/extractor_frames_desde_video/plan.md
+
+# 2) Execute loop against the generated loop directory
+./ralph-loop run PRD/extractor_frames_desde_video/.ralph-loop
+```
+
+Equivalent explicit form:
+
+```bash
+CONFIG=ralph-config.yaml LOOP_DIR=PRD/extractor_frames_desde_video/.ralph-loop ./ralph-loop run
+```
+
+Use the same `LOOP_DIR` for status/validation:
+
+```bash
+./ralph-loop status PRD/extractor_frames_desde_video/.ralph-loop
+./ralph-loop validate PRD/extractor_frames_desde_video/.ralph-loop
+```
+
+---
+
 ## What It Does
 
 ralph-loop takes a list of coding tasks (markdown files with YAML frontmatter) and iterates through them autonomously:

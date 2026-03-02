@@ -22,6 +22,7 @@ You can still provide any of these paths explicitly in YAML to override the conv
 - `max_retries` (default `3`)
 - `verify_commands` (default `[]`)
 - `project_instructions` (optional explicit path; if omitted, auto-detected from loop dir ancestors: `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`)
+- `backends.init` or `backends.initialize` for init plan generation role (falls back to `inspector`, then `coder`)
 - `auth` map (`codex`, `copilot`, `claude`) with:
   - `env`: list of env vars to forward in Docker mode
   - `mount`: list of host paths to mount inside backend containers
@@ -37,6 +38,10 @@ You can still provide any of these paths explicitly in YAML to override the conv
 max_retries: 3
 
 backends:
+  init:
+    engine: copilot
+    model: claude-opus-4-6
+    timeout_seconds: 300
   coder:
     engine: codex
     model: gpt-5.3-codex

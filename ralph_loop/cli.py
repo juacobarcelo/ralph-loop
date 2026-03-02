@@ -16,7 +16,7 @@ from jinja2 import Template
 from pydantic import BaseModel, Field, ValidationError
 
 from ralph_loop.backends import get_backend
-from ralph_loop.config import RalphConfig
+from ralph_loop.config import RalphConfig, VisualVerifyConfig
 from ralph_loop.loop import run_loop
 from ralph_loop.progress import (
     FeedbackEntry,
@@ -56,6 +56,7 @@ class GeneratedTask(BaseModel):
     test_plan: str = ""
     priority: str = "medium"
     verify_commands: list[str] = Field(default_factory=list)
+    visual_verify: VisualVerifyConfig | None = None
     files_to_touch: list[str] = Field(default_factory=list)
     files_not_to_touch: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
@@ -138,9 +139,21 @@ def _extract_step_result(step_result_path: str | None) -> dict[str, Any] | None:
     return data
 
 
-def _build_coder_prompt(task: Any) -> str:
-    task_path = Path(str(task.task_file))
-    if task_path.exists():
+def _resolve_task_file_path(task_file: str, config: RalphConfig) -> Path | None:
+    candidate = Path(task_file).expanduser()
+    if candidate.exists():
+        return candidate.resolve()
+
+    fallback = Path(config.task_dir) / candidate.name
+    if fallback.exists():
+        return fallback.resolve()
+
+    return None
+
+
+def _build_coder_prompt(task: Any, config: RalphConfig) -> str:
+    task_path = _resolve_task_file_path(str(task.task_file), config)
+    if task_path is not None:
         body = task_path.read_text(encoding="utf-8")
     else:
         body = f"# Task\n\n{task.title}"
@@ -152,6 +165,11 @@ def _build_inspector_prompt(task: Any, verification_results: list[dict[str, Any]
         f"# Inspect Task {task.id}: {task.title}",
         "",
         "Review task result and return strict JSON:",
+        "",
+        "Hard rules:",
+        "- If any deterministic verification failed, verdict MUST be `fail`.",
+        "- If visual verification failed or could not run, verdict MUST be `fail`.",
+        "- Return `pass` only when all acceptance checks are green.",
     ]
     lines.append('{"verdict":"pass|fail","feedback":"..."}')
     if verification_results:
@@ -166,9 +184,17 @@ def _summary(progress: Progress) -> dict[str, int]:
     return {"completed": completed, "aborted": aborted, "total": len(tasks)}
 
 
+def _first_aborted_task(progress: Progress) -> Any | None:
+    for phase in progress.phases:
+        for task in phase.tasks:
+            if task.status == TaskStatus.ABORT:
+                return task
+    return None
+
+
 def _parse_inspector_output(stdout: str) -> tuple[str, str]:
     try:
-        parsed = json.loads(stdout)
+        parsed = _extract_first_json_object(stdout)
         if isinstance(parsed, dict):
             verdict = str(parsed.get("verdict", "fail")).strip().lower()
             feedback = str(parsed.get("feedback", "")).strip()
@@ -236,12 +262,13 @@ def _run_prompt_with_available_backend(
 
     prompt_content = prompt_file.read_text(encoding="utf-8")
     _, backend = _select_available_backend()
+    backend_cwd = _infer_prompt_cwd(prompt_file)
     result = backend.execute(
         prompt=prompt_content,
         model=model,
         timeout_seconds=timeout_seconds,
         extra_flags=extra_flags or [],
-        cwd=str(prompt_file.parent),
+        cwd=str(backend_cwd),
     )
 
     if result.stdout:
@@ -250,6 +277,13 @@ def _run_prompt_with_available_backend(
         click.echo(result.stderr, err=True, nl=False)
 
     return int(result.exit_code)
+
+
+def _infer_prompt_cwd(prompt_file: Path) -> Path:
+    prompt_parent = prompt_file.parent
+    if prompt_parent.name == ".ralph-tmp":
+        return prompt_parent.parent
+    return prompt_parent
 
 
 def _invoke_self(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -297,7 +331,11 @@ def _invoke_docker_cli(
                 expanded = Path(mount_path).expanduser()
                 if not expanded.exists():
                     continue
-                command.extend(["-v", f"{expanded}:{expanded}:ro"])
+                if mount_path.startswith("~/"):
+                    container_target = Path("/home/ralph") / mount_path[2:]
+                else:
+                    container_target = expanded
+                command.extend(["-v", f"{expanded}:{container_target}"])
 
     container_prompt = Path("/workspace") / prompt_file.relative_to(workspace)
     command.extend([image, subcommand, "--prompt-file", str(container_prompt)])
@@ -389,24 +427,37 @@ def _extract_first_json_object(payload: str) -> dict[str, Any]:
 
 
 def _fallback_plan(source_text: str, title_hint: str) -> GeneratedPlan:
-    tasks: list[GeneratedTask] = []
+    checklist: list[str] = []
+    bullets: list[str] = []
     for line in source_text.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith(("- [ ]", "- ", "* ")):
-            candidate = stripped.split(" ", 2)[-1].strip()
+
+        if stripped.startswith("- [ ]"):
+            candidate = re.sub(r"^- \[ \]\s*", "", stripped).strip()
             if candidate:
-                task_id = f"{len(tasks) + 1:02d}"
-                tasks.append(
-                    GeneratedTask(
-                        id=task_id,
-                        title=candidate,
-                        description=candidate,
-                        acceptance_criteria=["Implementation is complete and validated."],
-                        test_plan="1. Run the configured verification commands.",
-                    )
-                )
+                checklist.append(candidate)
+            continue
+
+        if stripped.startswith(("- ", "* ")):
+            candidate = stripped[2:].strip()
+            if candidate:
+                bullets.append(candidate)
+
+    candidates = checklist if checklist else bullets
+    tasks: list[GeneratedTask] = []
+    for candidate in candidates:
+        task_id = f"{len(tasks) + 1:02d}"
+        tasks.append(
+            GeneratedTask(
+                id=task_id,
+                title=candidate,
+                description=candidate,
+                acceptance_criteria=["Implementation is complete and validated."],
+                test_plan="1. Run the configured verification commands.",
+            )
+        )
 
     if not tasks:
         summary = source_text.strip().splitlines()
@@ -421,9 +472,89 @@ def _fallback_plan(source_text: str, title_hint: str) -> GeneratedPlan:
             )
         )
 
-    return GeneratedPlan(
+    plan = GeneratedPlan(
         title=title_hint, phases=[GeneratedPhase(id=1, name="Phase 1", tasks=tasks)]
     )
+    return _apply_plan_hints(plan, source_text)
+
+
+def _extract_verify_command_hint(source_text: str) -> str | None:
+    patterns = [
+        r"`(python\s+-m\s+pytest[^`]+)`",
+        r"`(pytest[^`]+)`",
+        r"`(ruff\s+check[^`]+)`",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, source_text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _extract_visual_verify_hint(source_text: str) -> VisualVerifyConfig | None:
+    lowered = source_text.lower()
+    if "visual verification" not in lowered and "visual_verify" not in lowered:
+        return None
+
+    reference_match = re.search(r"Reference image path:\s*`([^`]+)`", source_text)
+    assertion_match = re.search(r"Assertion:\s*(.+)", source_text)
+    url_match = re.search(r"URL:\s*`([^`]+)`", source_text)
+
+    if url_match:
+        url = url_match.group(1).strip()
+    elif "data url" in lowered:
+        url = (
+            "data:text/html,%3Chtml%3E%3Cbody%20style%3D%22font-family%3AArial%3Bmargin%3A40px%22"
+            "%3E%3Ch1%3EMini%20Calc%3C/h1%3E%3Cp%3ESimple%20operations%20demo%3C/p%3E%3C/body%3E"
+            "%3C/html%3E"
+        )
+    else:
+        url = "http://localhost:3000"
+
+    reference = reference_match.group(1).strip() if reference_match else None
+    assertion = (
+        assertion_match.group(1).strip()
+        if assertion_match
+        else "The page should satisfy the visual assertion."
+    )
+
+    return VisualVerifyConfig(
+        type="screenshot",
+        url=url,
+        reference=reference,
+        assertion=assertion,
+        viewport_width=1280,
+        viewport_height=720,
+    )
+
+
+def _apply_plan_hints(plan: GeneratedPlan, source_text: str) -> GeneratedPlan:
+    verify_hint = _extract_verify_command_hint(source_text)
+    visual_hint = _extract_visual_verify_hint(source_text)
+
+    has_visual = False
+    for phase in plan.phases:
+        for task in phase.tasks:
+            if verify_hint and not task.verify_commands:
+                task.verify_commands = [verify_hint]
+            if task.visual_verify is not None:
+                has_visual = True
+
+    if visual_hint is not None and not has_visual:
+        keywords = ("visual", "ui", "web", "index.html", "homepage", "page")
+        fallback_task: GeneratedTask | None = None
+        for phase in plan.phases:
+            for task in phase.tasks:
+                if fallback_task is None:
+                    fallback_task = task
+                haystack = f"{task.title} {task.description}".lower()
+                if any(keyword in haystack for keyword in keywords):
+                    task.visual_verify = visual_hint
+                    return plan
+        if fallback_task is not None:
+            fallback_task.visual_verify = visual_hint
+
+    return plan
 
 
 def _build_prompt(source_content: str, config: RalphConfig) -> str:
@@ -435,6 +566,24 @@ def _build_prompt(source_content: str, config: RalphConfig) -> str:
 
     template = _load_plan_template()
     return template.render(source_content=source_content, project_instructions=project_instructions)
+
+
+def _ensure_init_directories(config: RalphConfig) -> None:
+    directories = [
+        Path(config.workspace_dir),
+        Path(config.task_dir),
+        Path(config.progress_file).parent,
+        Path(config.pause_file).parent,
+    ]
+    seen: set[Path] = set()
+    for directory in directories:
+        resolved = directory.resolve()
+        if resolved in seen:
+            continue
+        if not resolved.exists():
+            click.echo(f"[init] Creating directory: {resolved}")
+        resolved.mkdir(parents=True, exist_ok=True)
+        seen.add(resolved)
 
 
 def _generate_plan_with_backend(
@@ -456,13 +605,16 @@ def _generate_plan_with_backend(
     if not backend.is_available():
         return None
 
-    result = backend.execute(
-        prompt=prompt,
-        model=model,
-        timeout_seconds=role_backend.timeout_seconds,
-        extra_flags=role_backend.extra_flags,
-        cwd=config.workspace_dir,
-    )
+    try:
+        result = backend.execute(
+            prompt=prompt,
+            model=model,
+            timeout_seconds=role_backend.timeout_seconds,
+            extra_flags=role_backend.extra_flags,
+            cwd=config.workspace_dir,
+        )
+    except OSError:
+        return None
 
     if result.exit_code != 0:
         return None
@@ -484,39 +636,32 @@ def _format_task_markdown(phase_id: int, task: GeneratedTask) -> str:
         )
         or "1. Complete the requested implementation."
     )
-    files_to_touch = (
-        "\n".join([f"- {file_path}" for file_path in task.files_to_touch]) or "- (to define)"
-    )
+    files_to_touch = "\n".join([f"- {file_path}" for file_path in task.files_to_touch]) or "- (to define)"
     test_plan = task.test_plan or "1. Run the configured verification commands."
     constraints = "\n".join([f"- {constraint}" for constraint in task.constraints]) or "- None"
-    files_not_to_touch = "\n".join([f"- {file_path}" for file_path in task.files_not_to_touch])
-    verify_commands = "\n".join([f'  - "{command}"' for command in task.verify_commands])
-    if not verify_commands:
-        verify_commands = '  - ""'
+    frontmatter_payload: dict[str, object] = {
+        "phase": phase_id,
+        "priority": task.priority,
+        "verify_commands": task.verify_commands,
+        "visual_verify": task.visual_verify.model_dump(mode="json") if task.visual_verify else None,
+        "contract_file": None,
+        "files_to_touch": task.files_to_touch,
+        "files_not_to_touch": task.files_not_to_touch,
+    }
+    frontmatter = yaml.safe_dump(frontmatter_payload, sort_keys=False, allow_unicode=True).strip()
 
     reference_section = ""
     if task.reference_impl:
         reference_section = f"\n\n## Reference Implementation\n\n{task.reference_impl}"
 
     not_to_touch_section = ""
-    if files_not_to_touch:
-        not_to_touch_section = f"\n{files_not_to_touch}"
+    if task.files_not_to_touch:
+        not_to_touch_section = "\n" + "\n".join(
+            [f"- {file_path}" for file_path in task.files_not_to_touch]
+        )
 
     return (
-        f"---\n"
-        f"phase: {phase_id}\n"
-        f"priority: {task.priority}\n"
-        f"verify_commands:\n"
-        f"{verify_commands}\n"
-        f"visual_verify: null\n"
-        f"contract_file: null\n"
-        f"files_to_touch:\n"
-        + "\n".join([f'  - "{path}"' for path in task.files_to_touch])
-        + ("\n" if task.files_to_touch else '\n  - ""\n')
-        + "files_not_to_touch:\n"
-        + "\n".join([f'  - "{path}"' for path in task.files_not_to_touch])
-        + ("\n" if task.files_not_to_touch else '\n  - ""\n')
-        + "---\n\n"
+        f"---\n{frontmatter}\n---\n\n"
         + f"# Task {task.id}: {task.title}\n\n"
         + f"**Phase**: {phase_id}\n\n"
         + "## Description\n\n"
@@ -564,7 +709,9 @@ def _write_generated_artifacts(ctx: _InitContext, plan: GeneratedPlan) -> tuple[
                     "status": "not_started",
                     "retries": 0,
                     "verify_commands": task.verify_commands,
-                    "visual_verify": None,
+                    "visual_verify": (
+                        task.visual_verify.model_dump(mode="json") if task.visual_verify else None
+                    ),
                     "feedback": [],
                 }
             )
@@ -648,23 +795,27 @@ def validate_command(config_path: str) -> None:
     config, progress = _load_config_and_progress(config_path)
 
     task_dir = Path(config.task_dir)
-    progress_task_files = {
-        Path(task.task_file).resolve() for phase in progress.phases for task in phase.tasks
-    }
+    progress_task_files: set[Path] = set()
+    missing_in_progress: list[str] = []
+
+    for phase in progress.phases:
+        for task in phase.tasks:
+            resolved = _resolve_task_file_path(task.task_file, config)
+            if resolved is None:
+                missing_in_progress.append(task.task_file)
+                continue
+            progress_task_files.add(resolved)
 
     if not task_dir.exists():
         raise click.ClickException(f"Task directory does not exist: {task_dir}")
 
-    task_files_on_disk = set(task_dir.glob("*.md"))
-    missing_on_disk = [path for path in sorted(progress_task_files) if not path.exists()]
-    if missing_on_disk:
+    task_files_on_disk = {path.resolve() for path in task_dir.glob("*.md")}
+    if missing_in_progress:
         raise click.ClickException(
-            f"Task files referenced in progress are missing: {missing_on_disk}"
+            f"Task files referenced in progress are missing: {missing_in_progress}"
         )
 
-    not_referenced = [
-        path for path in sorted(task_files_on_disk) if path.resolve() not in progress_task_files
-    ]
+    not_referenced = [path for path in sorted(task_files_on_disk) if path not in progress_task_files]
     if not_referenced:
         raise click.ClickException(f"Task files not referenced in progress: {not_referenced}")
 
@@ -721,6 +872,7 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
                             "command": "verify",
                             "task_id": task.id,
                             "commands": verify_commands,
+                            "workspace_dir": config.workspace_dir,
                         }
                     )
                 )
@@ -757,9 +909,7 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
                         "command": "inspect",
                         "task_id": task.id,
                         "image": f"ralph-loop-{inspector.engine}",
-                        "prompt_file": str(
-                            paths.inspector_prompt_path.relative_to(Path(config.workspace_dir))
-                        ),
+                        "prompt_file": str(paths.inspector_prompt_path),
                         "model": inspector.model,
                         "timeout_seconds": inspector.timeout_seconds,
                         "extra_flags": inspector.extra_flags,
@@ -802,9 +952,7 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
                         "command": "inspect",
                         "task_id": task.id,
                         "image": f"ralph-loop-{inspector.engine}",
-                        "prompt_file": str(
-                            paths.inspector_prompt_path.relative_to(Path(config.workspace_dir))
-                        ),
+                        "prompt_file": str(paths.inspector_prompt_path),
                         "model": inspector.model,
                         "timeout_seconds": inspector.timeout_seconds,
                         "extra_flags": inspector.extra_flags,
@@ -827,9 +975,7 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
                         "command": "inspect",
                         "task_id": task.id,
                         "image": f"ralph-loop-{inspector.engine}",
-                        "prompt_file": str(
-                            paths.inspector_prompt_path.relative_to(Path(config.workspace_dir))
-                        ),
+                        "prompt_file": str(paths.inspector_prompt_path),
                         "model": inspector.model,
                         "timeout_seconds": inspector.timeout_seconds,
                         "extra_flags": inspector.extra_flags,
@@ -848,6 +994,19 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
     if iteration is not None and iteration.get("current_step") == "update":
         _clear_iteration_state(paths.iteration_path)
 
+    aborted_task = _first_aborted_task(progress)
+    if aborted_task is not None:
+        click.echo(
+            json.dumps(
+                {
+                    "command": "abort",
+                    "task_id": aborted_task.id,
+                    "reason": "task_aborted",
+                }
+            )
+        )
+        return
+
     next_task = select_next_task(progress, config.max_retries)
     if next_task is None:
         summary = _summary(progress)
@@ -857,7 +1016,7 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
 
     lock_task(progress, next_task.id)
     save_progress(progress, config.progress_file)
-    coder_prompt = _build_coder_prompt(next_task)
+    coder_prompt = _build_coder_prompt(next_task, config)
     paths.coder_prompt_path.write_text(coder_prompt, encoding="utf-8")
 
     iteration = {
@@ -875,7 +1034,7 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
                 "command": "code",
                 "task_id": next_task.id,
                 "image": f"ralph-loop-{coder.engine}",
-                "prompt_file": str(paths.coder_prompt_path.relative_to(Path(config.workspace_dir))),
+                "prompt_file": str(paths.coder_prompt_path),
                 "model": coder.model,
                 "timeout_seconds": coder.timeout_seconds,
                 "extra_flags": coder.extra_flags,
@@ -949,7 +1108,10 @@ def visual_command(
     config = _load_config(config_path)
     progress = load_progress(config.progress_file)
     task_progress = find_task(progress, task_id)
-    task = Task.load(task_progress.task_file)
+    task_path = _resolve_task_file_path(task_progress.task_file, config)
+    if task_path is None:
+        raise click.ClickException(f"Task file not found: {task_progress.task_file}")
+    task = Task.load(str(task_path))
 
     _, backend = _select_available_backend()
     visual_config = task_progress.visual_verify or task.frontmatter.visual_verify
@@ -986,6 +1148,9 @@ def update_command(config_path: str, result_dir: str) -> None:
 
     all_passed = True
     feedback_sources: list[FeedbackSource] = []
+    has_visual_result = False
+    has_inspect_result = False
+    visual_required = task.visual_verify is not None
 
     for item in results:
         step_name = str(item.get("step", ""))
@@ -1028,6 +1193,7 @@ def update_command(config_path: str, result_dir: str) -> None:
             continue
 
         if step_name == "visual":
+            has_visual_result = True
             verdict, feedback = _parse_inspector_output(str(item.get("stdout", "")))
             step_exit_code = int(item.get("exit_code", 0))
             if step_exit_code != 0:
@@ -1042,12 +1208,33 @@ def update_command(config_path: str, result_dir: str) -> None:
             continue
 
         if step_name == "inspect":
+            has_inspect_result = True
             verdict, feedback = _parse_inspector_output(str(item.get("stdout", "")))
             if verdict != "pass":
                 all_passed = False
             feedback_sources.append(
                 FeedbackSource(type="ai_inspection", verdict=verdict, details=feedback)
             )
+
+    if visual_required and not has_visual_result:
+        all_passed = False
+        feedback_sources.append(
+            FeedbackSource(
+                type="visual",
+                verdict="fail",
+                details="Visual verification was required but no visual result was recorded.",
+            )
+        )
+
+    if not has_inspect_result:
+        all_passed = False
+        feedback_sources.append(
+            FeedbackSource(
+                type="ai_inspection",
+                verdict="fail",
+                details="Inspector result missing for this attempt.",
+            )
+        )
 
     if all_passed:
         complete_task(progress, task.id)
@@ -1099,11 +1286,26 @@ def init_command(
         raise click.ClickException(f"Source plan not found: {source}")
 
     config_file = Path(config_path)
+    click.echo(f"[init] Loading config: {config_file}")
     config = _ensure_config(config_file)
     context = _InitContext(source_path=source, config_path=config_file, config=config)
+    _ensure_init_directories(config)
 
+    click.echo(f"[init] Reading source design: {source}")
     source_content = source.read_text(encoding="utf-8")
     prompt = _build_prompt(source_content, config)
+
+    role_backend = (
+        config.get_backend("inspector")
+        if "inspector" in config.backends
+        else config.get_backend("coder")
+    )
+    selected_engine = backend or role_backend.engine
+    selected_model = model or role_backend.model
+    if selected_model:
+        click.echo(f"[init] Generating plan with backend '{selected_engine}' (model: {selected_model})")
+    else:
+        click.echo(f"[init] Generating plan with backend '{selected_engine}'")
 
     generated_plan = _generate_plan_with_backend(
         config=config,
@@ -1112,8 +1314,13 @@ def init_command(
         model_override=model,
     )
     if generated_plan is None:
+        click.echo("[init] AI generation unavailable/invalid. Using deterministic fallback parser.")
         generated_plan = _fallback_plan(source_content, source.stem.replace("-", " ").title())
+    else:
+        click.echo("[init] AI generation completed.")
+        generated_plan = _apply_plan_hints(generated_plan, source_content)
 
+    click.echo("[init] Writing tasks and progress files...")
     count, task_dir, progress_path = _write_generated_artifacts(context, generated_plan)
     click.echo(f"Generated {count} task file(s) in {task_dir}")
     click.echo(f"Generated progress file: {progress_path}")

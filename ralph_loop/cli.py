@@ -36,12 +36,21 @@ from ralph_loop.task import Task
 from ralph_loop.verification.visual import run_visual_verification
 
 
-def _load_config(config_path: str) -> RalphConfig:
-    return RalphConfig.load(config_path)
+def _default_config_path() -> str:
+    configured = os.environ.get("RALPH_CONFIG")
+    if configured:
+        return configured
+    return str((Path.home() / ".config" / "ralph-loop" / "config.yaml").resolve())
 
 
-def _load_config_and_progress(config_path: str) -> tuple[RalphConfig, Progress]:
-    config = _load_config(config_path)
+def _load_config(config_path: str, loop_dir: str = ".") -> RalphConfig:
+    return RalphConfig.load(config_path, loop_dir=loop_dir)
+
+
+def _load_config_and_progress(
+    config_path: str, loop_dir: str = "."
+) -> tuple[RalphConfig, Progress]:
+    config = _load_config(config_path, loop_dir)
     progress = load_progress(config.progress_file)
     return config, progress
 
@@ -81,7 +90,6 @@ class GeneratedPlan(BaseModel):
 @dataclass
 class _InitContext:
     source_path: Path
-    config_path: Path
     config: RalphConfig
 
 
@@ -384,27 +392,26 @@ def _slugify(value: str) -> str:
     return normalized.strip("-") or "task"
 
 
-def _ensure_config(config_path: Path) -> RalphConfig:
+def _derive_loop_dir_from_source(source: Path) -> Path:
+    return source.parent / ".ralph-loop" / _slugify(source.stem)
+
+
+def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
     if config_path.exists():
-        return RalphConfig.load(str(config_path))
+        return RalphConfig.load(str(config_path), loop_dir=str(loop_dir))
 
     scaffold = {
-        "progress_file": "PROGRESS.yaml",
-        "task_dir": "tasks/",
         "max_retries": 3,
-        "pause_file": "PAUSE.md",
-        "workspace_dir": ".",
         "backends": {
             "coder": {"engine": "codex", "model": "gpt-5.3-codex", "timeout_seconds": 600},
             "inspector": {"engine": "copilot", "model": "claude-opus-4-6", "timeout_seconds": 300},
         },
         "verify_commands": [],
         "auth": {},
-        "project_instructions": None,
     }
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(yaml.safe_dump(scaffold, sort_keys=False), encoding="utf-8")
-    return RalphConfig.load(str(config_path))
+    return RalphConfig.load(str(config_path), loop_dir=str(loop_dir))
 
 
 def _load_plan_template() -> Template:
@@ -744,10 +751,11 @@ def main() -> None:
 
 
 @main.command("status")
-@click.option("--config", "config_path", default="ralph-config.yaml", show_default=True)
-def status_command(config_path: str) -> None:
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+@click.option("--loop-dir", default=".", show_default=True)
+def status_command(config_path: str, loop_dir: str) -> None:
     """Print a summary of PROGRESS.yaml."""
-    config, progress = _load_config_and_progress(config_path)
+    config, progress = _load_config_and_progress(config_path, loop_dir)
 
     click.echo("ralph-loop status")
     click.echo("─────────────────────────────────")
@@ -781,7 +789,7 @@ def status_command(config_path: str) -> None:
 
 
 @main.command("list-engines")
-@click.option("--config", "config_path", default="ralph-config.yaml", show_default=True)
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
 def list_engines_command(config_path: str) -> None:
     """Print unique engine names from configured backend roles."""
     config = _load_config(config_path)
@@ -791,10 +799,11 @@ def list_engines_command(config_path: str) -> None:
 
 
 @main.command("validate")
-@click.option("--config", "config_path", default="ralph-config.yaml", show_default=True)
-def validate_command(config_path: str) -> None:
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+@click.option("--loop-dir", default=".", show_default=True)
+def validate_command(config_path: str, loop_dir: str) -> None:
     """Validate consistency between config, progress, and task files."""
-    config, progress = _load_config_and_progress(config_path)
+    config, progress = _load_config_and_progress(config_path, loop_dir)
 
     task_dir = Path(config.task_dir)
     progress_task_files: set[Path] = set()
@@ -835,11 +844,12 @@ def validate_command(config_path: str) -> None:
 
 
 @main.command("next-action")
-@click.option("--config", "config_path", required=True)
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+@click.option("--loop-dir", default=".", show_default=True)
 @click.option("--step-result", "step_result_path", required=False)
-def next_action_command(config_path: str, step_result_path: str | None) -> None:
+def next_action_command(config_path: str, loop_dir: str, step_result_path: str | None) -> None:
     """Determine next orchestration action."""
-    config = _load_config(config_path)
+    config = _load_config(config_path, loop_dir)
     progress = load_progress(config.progress_file)
     paths = _runtime_paths(config)
     paths.tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -1049,11 +1059,12 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
 
 
 @main.command("run")
-@click.option("--config", "config_path", default="ralph-config.yaml", show_default=True)
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+@click.option("--loop-dir", default=".", show_default=True)
 @click.option("--sandbox", type=click.Choice(["none", "docker"]), default="none", show_default=True)
-def run_command(config_path: str, sandbox: str) -> None:
+def run_command(config_path: str, loop_dir: str, sandbox: str) -> None:
     """Run the native orchestration loop."""
-    config = _load_config(config_path)
+    config = _load_config(config_path, loop_dir)
     raise SystemExit(run_loop(config, sandbox=sandbox))
 
 
@@ -1096,20 +1107,22 @@ def inspect_command(
 
 
 @main.command("visual")
-@click.option("--config", "config_path", required=True)
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+@click.option("--loop-dir", default=".", show_default=True)
 @click.option("--task-id", required=True)
 @click.option("--model", required=False)
 @click.option("--timeout-seconds", type=int, default=300, show_default=True)
 @click.option("--extra-flag", "extra_flags", multiple=True)
 def visual_command(
     config_path: str,
+    loop_dir: str,
     task_id: str,
     model: str | None,
     timeout_seconds: int,
     extra_flags: tuple[str, ...],
 ) -> None:
     """Run visual verification and print JSON verdict."""
-    config = _load_config(config_path)
+    config = _load_config(config_path, loop_dir)
     progress = load_progress(config.progress_file)
     task_progress = find_task(progress, task_id)
     task_path = _resolve_task_file_path(task_progress.task_file, config)
@@ -1132,11 +1145,12 @@ def visual_command(
 
 
 @main.command("update")
-@click.option("--config", "config_path", required=True)
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+@click.option("--loop-dir", default=".", show_default=True)
 @click.option("--result-dir", required=True)
-def update_command(config_path: str, result_dir: str) -> None:
+def update_command(config_path: str, loop_dir: str, result_dir: str) -> None:
     """Aggregate step results and update progress."""
-    config = _load_config(config_path)
+    config = _load_config(config_path, loop_dir)
     progress = load_progress(config.progress_file)
     paths = _runtime_paths(config)
     iteration = _load_iteration_state(paths.iteration_path)
@@ -1253,10 +1267,11 @@ def update_command(config_path: str, result_dir: str) -> None:
 
 @main.command("reset")
 @click.argument("task_id")
-@click.option("--config", "config_path", default="ralph-config.yaml", show_default=True)
-def reset_command(task_id: str, config_path: str) -> None:
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+@click.option("--loop-dir", default=".", show_default=True)
+def reset_command(task_id: str, config_path: str, loop_dir: str) -> None:
     """Reset a task to not_started state."""
-    config, progress = _load_config_and_progress(config_path)
+    config, progress = _load_config_and_progress(config_path, loop_dir)
 
     found = False
     for phase in progress.phases:
@@ -1279,7 +1294,7 @@ def reset_command(task_id: str, config_path: str) -> None:
 @click.option("--from", "source_path", required=True)
 @click.option("--backend", required=False)
 @click.option("--model", required=False)
-@click.option("--config", "config_path", default="ralph-config.yaml", show_default=True)
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
 def init_command(
     source_path: str, backend: str | None, model: str | None, config_path: str
 ) -> None:
@@ -1288,10 +1303,12 @@ def init_command(
     if not source.exists():
         raise click.ClickException(f"Source plan not found: {source}")
 
+    loop_dir = _derive_loop_dir_from_source(source)
     config_file = Path(config_path)
     click.echo(f"[init] Loading config: {config_file}")
-    config = _ensure_config(config_file)
-    context = _InitContext(source_path=source, config_path=config_file, config=config)
+    click.echo(f"[init] Loop directory: {loop_dir}")
+    config = _ensure_config(config_file, loop_dir=loop_dir)
+    context = _InitContext(source_path=source, config=config)
     _ensure_init_directories(config)
 
     click.echo(f"[init] Reading source design: {source}")

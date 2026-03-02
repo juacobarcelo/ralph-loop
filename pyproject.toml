@@ -32,6 +32,10 @@ line-length = 100
 python_version = "3.11"
 strict = true
 
+[[tool.mypy.overrides]]
+module = "playwright.*"
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["ralph_loop"]
 timid = true

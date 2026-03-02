@@ -124,9 +124,7 @@ def test_init_command_generates_files_with_backend_output(
     assert payload["phases"][0]["tasks"][0]["visual_verify"]["reference"] == "references/home.jpg"
 
 
-def test_init_command_falls_back_when_backend_unavailable(
-    sample_workspace: Path, monkeypatch
-) -> None:
+def test_init_command_fails_when_backend_unavailable(sample_workspace: Path, monkeypatch) -> None:
     class _UnavailableBackend:
         def is_available(self) -> bool:
             return False
@@ -147,18 +145,85 @@ def test_init_command_falls_back_when_backend_unavailable(
             str(sample_workspace / "ralph-config.yaml"),
         ],
     )
-    assert result.exit_code == 0
-
-    assert (sample_workspace / "tasks" / "01-first-task.md").exists()
-    assert (sample_workspace / "tasks" / "02-second-task.md").exists()
+    assert result.exit_code != 0
+    assert "requires AI generation" in result.output
 
 
-def test_init_fallback_applies_verify_and_visual_hints(sample_workspace: Path, monkeypatch) -> None:
-    class _UnavailableBackend:
+def test_init_command_fails_when_backend_output_is_invalid(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    class _InvalidBackend:
         def is_available(self) -> bool:
-            return False
+            return True
 
-    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, extra_flags, cwd
+
+            class _Result:
+                exit_code = 0
+                stdout = "not-json"
+                stderr = ""
+                duration_seconds = 0.1
+                timed_out = False
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _InvalidBackend())
+
+    plan_path = sample_workspace / "plan-invalid-output.md"
+    plan_path.write_text("# Plan\n- [ ] First task", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--config",
+            str(sample_workspace / "ralph-config.yaml"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "requires AI generation" in result.output
+
+
+def test_init_applies_verify_and_visual_hints(sample_workspace: Path, monkeypatch) -> None:
+    class _FakeBackend:
+        def is_available(self) -> bool:
+            return True
+
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Visual Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [
+                            {
+                                "id": "01",
+                                "title": "Build homepage",
+                                "description": "Build homepage",
+                            },
+                            {"id": "02", "title": "Add tests", "description": "Add tests"},
+                        ],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+                duration_seconds = 0.1
+                timed_out = False
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
 
     plan_path = sample_workspace / "plan-visual.md"
     plan_path.write_text(
@@ -200,14 +265,36 @@ Verification:
     assert any(task["visual_verify"] is not None for task in tasks)
 
 
-def test_init_fallback_applies_visual_hint_without_reference(
-    sample_workspace: Path, monkeypatch
-) -> None:
-    class _UnavailableBackend:
+def test_init_applies_visual_hint_without_reference(sample_workspace: Path, monkeypatch) -> None:
+    class _FakeBackend:
         def is_available(self) -> bool:
-            return False
+            return True
 
-    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Visual Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [
+                            {"id": "01", "title": "Build homepage", "description": "Build homepage"}
+                        ],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+                duration_seconds = 0.1
+                timed_out = False
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
 
     plan_path = sample_workspace / "plan-visual-no-reference.md"
     plan_path.write_text(
@@ -377,12 +464,45 @@ def test_init_includes_instructions_file_and_inline_in_prompt(
     ) < prompt_value.index(inline_directive)
 
 
-def test_init_fallback_visual_directive_only_at_end(sample_workspace: Path, monkeypatch) -> None:
-    class _UnavailableBackend:
+def test_init_visual_directive_only_at_end(sample_workspace: Path, monkeypatch) -> None:
+    class _FakeBackend:
         def is_available(self) -> bool:
-            return False
+            return True
 
-    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Directive Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [
+                            {
+                                "id": "01",
+                                "title": "Build homepage layout",
+                                "description": "Build homepage layout",
+                            },
+                            {
+                                "id": "02",
+                                "title": "Improve homepage button readability",
+                                "description": "Improve homepage button readability",
+                            },
+                        ],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+                duration_seconds = 0.1
+                timed_out = False
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
 
     plan_path = sample_workspace / "plan-visual-end-only.md"
     plan_path.write_text(
@@ -416,14 +536,50 @@ def test_init_fallback_visual_directive_only_at_end(sample_workspace: Path, monk
     assert visual_tasks[0]["id"] == "02"
 
 
-def test_init_fallback_visual_directive_targets_specific_task(
-    sample_workspace: Path, monkeypatch
-) -> None:
-    class _UnavailableBackend:
+def test_init_visual_directive_targets_specific_task(sample_workspace: Path, monkeypatch) -> None:
+    class _FakeBackend:
         def is_available(self) -> bool:
-            return False
+            return True
 
-    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Directive Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [
+                            {
+                                "id": "01",
+                                "title": "Crear API de videos",
+                                "description": "Crear API de videos",
+                            },
+                            {
+                                "id": "02",
+                                "title": "Renderizar lista de videos",
+                                "description": "Renderizar lista de videos",
+                            },
+                            {
+                                "id": "03",
+                                "title": "Añadir tests",
+                                "description": "Añadir tests",
+                            },
+                        ],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+                duration_seconds = 0.1
+                timed_out = False
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
 
     plan_path = sample_workspace / "plan-visual-targeted.md"
     plan_path.write_text(
@@ -474,11 +630,31 @@ def test_init_creates_target_directories_when_missing(sample_workspace: Path, mo
     config_payload["pause_file"] = str(pause_file)
     config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
 
-    class _UnavailableBackend:
+    class _FakeBackend:
         def is_available(self) -> bool:
-            return False
+            return True
 
-    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Setup Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [{"id": "01", "title": "Setup project"}],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
 
     plan_path = sample_workspace / "plan-missing-dirs.md"
     plan_path.write_text("# Plan\n- [ ] Setup project", encoding="utf-8")
@@ -523,11 +699,31 @@ def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, mon
         encoding="utf-8",
     )
 
-    class _UnavailableBackend:
+    class _FakeBackend:
         def is_available(self) -> bool:
-            return False
+            return True
 
-    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Setup Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [{"id": "01", "title": "Setup project"}],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
 
     plan_path = workspace / "my-feature-plan.md"
     plan_path.write_text("# Plan\n- [ ] Setup project", encoding="utf-8")

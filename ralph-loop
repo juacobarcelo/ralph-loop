@@ -183,6 +183,16 @@ build_backend_args() {
 }
 
 cmd_run() {
+    local args=("$@")
+    if [[ ${#args[@]} -gt 0 && "${args[0]}" != -* ]]; then
+        LOOP_DIR="${args[0]}"
+        args=("${args[@]:1}")
+    fi
+    if [[ ${#args[@]} -gt 0 ]]; then
+        log_error "Unknown arguments for run: ${args[*]}"
+        exit 1
+    fi
+
     ensure_image "base"
     for engine in $(run_base list-engines --config "/workspace/$CONFIG" 2>/dev/null); do
         ensure_image "$engine"
@@ -316,6 +326,16 @@ cmd_run() {
 }
 
 cmd_status() {
+    local args=("$@")
+    if [[ ${#args[@]} -gt 0 && "${args[0]}" != -* ]]; then
+        LOOP_DIR="${args[0]}"
+        args=("${args[@]:1}")
+    fi
+    if [[ ${#args[@]} -gt 0 ]]; then
+        log_error "Unknown arguments for status: ${args[*]}"
+        exit 1
+    fi
+
     ensure_image "base"
     run_base status --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR"
 }
@@ -326,6 +346,16 @@ cmd_init() {
 }
 
 cmd_validate() {
+    local args=("$@")
+    if [[ ${#args[@]} -gt 0 && "${args[0]}" != -* ]]; then
+        LOOP_DIR="${args[0]}"
+        args=("${args[@]:1}")
+    fi
+    if [[ ${#args[@]} -gt 0 ]]; then
+        log_error "Unknown arguments for validate: ${args[*]}"
+        exit 1
+    fi
+
     ensure_image "base"
     run_base validate --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR"
 }
@@ -346,6 +376,10 @@ case "$SUBCOMMAND" in
     build-images) cmd_build_images "$@" ;;
     help|--help|-h)
         echo "Usage: ralph-loop <run|status|init|validate|build-images>"
+        echo "  run [LOOP_DIR]"
+        echo "  status [LOOP_DIR]"
+        echo "  validate [LOOP_DIR]"
+        echo "  init [args...]"
         ;;
     *)
         log_error "Unknown command: $SUBCOMMAND"

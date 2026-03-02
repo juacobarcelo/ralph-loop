@@ -135,7 +135,8 @@ def test_resolve_repo_root_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     repo_root_config = tmp_path / "ralph-config.yaml"
     repo_root_config.write_text(_MINIMAL_CONFIG, encoding="utf-8")
 
-    # Mock _get_repo_root to return tmp_path as the repo root.
+    # Mock submodule host root to return tmp_path as the repo root.
+    monkeypatch.setattr("ralph_loop.config._get_superproject_root", lambda: tmp_path.resolve())
     monkeypatch.setattr("ralph_loop.config._get_repo_root", lambda: tmp_path.resolve())
 
     result = resolve_config_path()
@@ -151,6 +152,7 @@ def test_resolve_global_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     cwd.mkdir()
     monkeypatch.chdir(cwd)
 
+    monkeypatch.setattr("ralph_loop.config._get_superproject_root", lambda: None)
     # No repo root.
     monkeypatch.setattr("ralph_loop.config._get_repo_root", lambda: None)
 
@@ -176,6 +178,7 @@ def test_resolve_no_config_raises_with_attempted_paths(
     cwd.mkdir()
     monkeypatch.chdir(cwd)
 
+    monkeypatch.setattr("ralph_loop.config._get_superproject_root", lambda: None)
     monkeypatch.setattr("ralph_loop.config._get_repo_root", lambda: None)
 
     # Point global to a non-existent path.
@@ -199,6 +202,7 @@ def test_resolve_repo_root_skipped_when_equals_cwd(
     monkeypatch.delenv("RALPH_CONFIG", raising=False)
     monkeypatch.chdir(tmp_path)
 
+    monkeypatch.setattr("ralph_loop.config._get_superproject_root", lambda: None)
     # _get_repo_root returns CWD itself.
     monkeypatch.setattr("ralph_loop.config._get_repo_root", lambda: tmp_path.resolve())
 
@@ -224,3 +228,26 @@ def test_resolve_git_not_available(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     assert _get_repo_root() is None
+
+
+def test_resolve_submodule_ignores_local_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When inside a submodule, local config is ignored in favor of host config."""
+    monkeypatch.delenv("RALPH_CONFIG", raising=False)
+
+    submodule_dir = tmp_path / "submodule"
+    submodule_dir.mkdir(parents=True)
+    monkeypatch.chdir(submodule_dir)
+
+    submodule_config = submodule_dir / "ralph-config.yaml"
+    submodule_config.write_text(_MINIMAL_CONFIG, encoding="utf-8")
+
+    host_config = tmp_path / "ralph-config.yaml"
+    host_config.write_text(_MINIMAL_CONFIG, encoding="utf-8")
+
+    monkeypatch.setattr("ralph_loop.config._get_superproject_root", lambda: tmp_path.resolve())
+    monkeypatch.setattr("ralph_loop.config._get_repo_root", lambda: tmp_path.resolve())
+
+    result = resolve_config_path()
+    assert result == str(host_config.resolve())

@@ -1147,6 +1147,68 @@ def test_next_action_includes_visual_step(sample_workspace: Path, monkeypatch) -
     assert json.loads(third.output)["command"] == "inspect"
 
 
+def test_next_action_visual_includes_setup_teardown_commands(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    progress_path = sample_workspace / "PROGRESS.yaml"
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+
+    progress = load_progress(str(progress_path))
+    progress.phases[0].tasks[0].verify_commands = []
+    progress.phases[0].tasks[0].visual_verify = VisualVerifyConfig.model_validate(
+        {
+            "type": "screenshot",
+            "url": "http://localhost:8894",
+            "reference": None,
+            "assertion": "Layout should match",
+            "viewport_width": 1280,
+            "viewport_height": 720,
+            "setup_commands": ["docker compose up -d myservice", "sleep 3"],
+            "teardown_commands": ["docker compose stop myservice"],
+        }
+    )
+    save_progress(progress, str(progress_path))
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    runner = CliRunner()
+    first = runner.invoke(main, ["next-action", "--config", str(config_path)])
+    assert first.exit_code == 0
+    assert json.loads(first.output)["command"] == "code"
+
+    step_result = tmp_dir / "step-result.json"
+    step_result.write_text(
+        json.dumps({"step": "code", "task_id": "01", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    second = runner.invoke(
+        main,
+        [
+            "next-action",
+            "--config",
+            str(config_path),
+            "--step-result",
+            str(step_result),
+        ],
+    )
+    assert second.exit_code == 0
+    second_payload = json.loads(second.output)
+    assert second_payload["command"] == "visual"
+    assert second_payload["setup_commands"] == ["docker compose up -d myservice", "sleep 3"]
+    assert second_payload["teardown_commands"] == ["docker compose stop myservice"]
+    assert "workspace_dir" in second_payload
+
+
 def test_next_action_returns_abort_when_any_task_is_aborted(
     sample_workspace: Path, monkeypatch
 ) -> None:

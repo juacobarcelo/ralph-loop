@@ -24,7 +24,9 @@ Schema:
             "reference": "string|null",
             "assertion": "string",
             "viewport_width": 1280,
-            "viewport_height": 720
+            "viewport_height": 720,
+            "setup_commands": ["string"],
+            "teardown_commands": ["string"]
           } | null,
           "files_to_touch": ["string"],
           "files_not_to_touch": ["string"],
@@ -44,6 +46,8 @@ Rules:
 - Do not prefix `verify_commands` with `cd tmp/product` (or any `cd` to the workspace path).
 - Include `visual_verify` for tasks that explicitly require visual checks.
 - If visual verification should inspect only the current screenshot, set `visual_verify.reference` to `null`.
+- When `visual_verify.url` targets a local service (e.g., `http://localhost:PORT`), populate `setup_commands` with the commands needed to start that service (e.g., `docker compose up -d SERVICE`, `sleep 3`) and `teardown_commands` to stop it. These run on the host before and after the screenshot.
+- If the service is already guaranteed to be running externally, leave `setup_commands` and `teardown_commands` as empty arrays.
 - If additional directives conflict with inferred hints, additional directives take precedence.
 - Output valid JSON with double quotes only.
 

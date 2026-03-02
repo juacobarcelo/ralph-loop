@@ -325,3 +325,75 @@ demo
 
     assert result.verdict == "pass"
     assert "single screenshot ok" in result.details
+
+
+def test_visual_url_rewriting_in_container(monkeypatch, tmp_path) -> None:
+    """Test that localhost URLs are rewritten to host.docker.internal inside containers."""
+    from ralph_loop.verification.visual import (
+        _normalize_visual_target_url,
+        _rewrite_localhost_for_container,
+    )
+
+    # Direct rewrite function
+    assert (
+        _rewrite_localhost_for_container("http://localhost:8894")
+        == "http://host.docker.internal:8894"
+    )
+    assert (
+        _rewrite_localhost_for_container("http://localhost:3000/api")
+        == "http://host.docker.internal:3000/api"
+    )
+    assert _rewrite_localhost_for_container("http://example.com:8080") == "http://example.com:8080"
+
+    # Simulate container environment
+    dockerenv = tmp_path / ".dockerenv"
+    dockerenv.touch()
+    monkeypatch.setattr(
+        "ralph_loop.verification.visual._is_running_in_container",
+        lambda: True,
+    )
+
+    result = _normalize_visual_target_url("http://localhost:8894", tmp_path)
+    assert result == "http://host.docker.internal:8894"
+
+    # Non-localhost URLs are not rewritten
+    result = _normalize_visual_target_url("http://myservice:8080", tmp_path)
+    assert result == "http://myservice:8080"
+
+
+def test_visual_url_not_rewritten_outside_container(monkeypatch, tmp_path) -> None:
+    """Test that localhost URLs are NOT rewritten when not in a container."""
+    from ralph_loop.verification.visual import _normalize_visual_target_url
+
+    monkeypatch.setattr(
+        "ralph_loop.verification.visual._is_running_in_container",
+        lambda: False,
+    )
+
+    # Outside container, localhost stays as-is
+    result = _normalize_visual_target_url("http://localhost:8894", tmp_path)
+    assert result == "http://localhost:8894"
+
+
+def test_visual_verify_config_accepts_setup_teardown_commands() -> None:
+    """Test that VisualVerifyConfig accepts setup and teardown commands."""
+    config = VisualVerifyConfig(
+        type="screenshot",
+        url="http://localhost:8894",
+        assertion="Page loads correctly",
+        setup_commands=["docker compose up -d myservice", "sleep 3"],
+        teardown_commands=["docker compose stop myservice"],
+    )
+    assert config.setup_commands == ["docker compose up -d myservice", "sleep 3"]
+    assert config.teardown_commands == ["docker compose stop myservice"]
+
+
+def test_visual_verify_config_defaults_empty_setup_teardown() -> None:
+    """Test that setup and teardown commands default to empty lists."""
+    config = VisualVerifyConfig(
+        type="screenshot",
+        url="http://localhost:8894",
+        assertion="Page loads correctly",
+    )
+    assert config.setup_commands == []
+    assert config.teardown_commands == []

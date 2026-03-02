@@ -1091,6 +1091,9 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                             "model": visual.model,
                             "timeout_seconds": visual.timeout_seconds,
                             "extra_flags": visual.extra_flags,
+                            "setup_commands": task.visual_verify.setup_commands,
+                            "teardown_commands": task.visual_verify.teardown_commands,
+                            "workspace_dir": config.workspace_dir,
                             "auth": config.get_auth(visual.engine).model_dump(),
                         }
                     )
@@ -1133,6 +1136,9 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                             "model": visual.model,
                             "timeout_seconds": visual.timeout_seconds,
                             "extra_flags": visual.extra_flags,
+                            "setup_commands": task.visual_verify.setup_commands,
+                            "teardown_commands": task.visual_verify.teardown_commands,
+                            "workspace_dir": config.workspace_dir,
                             "auth": config.get_auth(visual.engine).model_dump(),
                         }
                     )

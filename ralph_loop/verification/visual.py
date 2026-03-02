@@ -146,7 +146,10 @@ def _capture_screenshot(config: VisualVerifyConfig, workspace: Path) -> _Screens
 def _normalize_visual_target_url(raw_url: str, workspace: Path) -> str:
     parsed = urlparse(raw_url)
     if parsed.scheme in {"http", "https", "data"}:
-        return raw_url
+        url = raw_url
+        if _is_running_in_container():
+            url = _rewrite_localhost_for_container(url)
+        return url
 
     if parsed.scheme == "file":
         path_value = _extract_file_url_path(parsed)
@@ -156,6 +159,25 @@ def _normalize_visual_target_url(raw_url: str, workspace: Path) -> str:
         return raw_url
 
     return _resolve_local_path(raw_url, workspace).as_uri()
+
+
+def _is_running_in_container() -> bool:
+    """Detect if we are running inside a Docker container."""
+    return Path("/.dockerenv").exists() or (
+        Path("/proc/1/cgroup").exists()
+        and "docker" in Path("/proc/1/cgroup").read_text(errors="ignore")
+    )
+
+
+def _rewrite_localhost_for_container(url: str) -> str:
+    """Rewrite localhost URLs to host.docker.internal for container→host access."""
+    import re
+
+    return re.sub(
+        r"(https?://)localhost(:\d+)?",
+        r"\1host.docker.internal\2",
+        url,
+    )
 
 
 def _extract_file_url_path(parsed: object) -> str:

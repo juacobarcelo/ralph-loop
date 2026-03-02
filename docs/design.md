@@ -241,6 +241,8 @@ class VisualVerifyConfig(BaseModel):
     assertion: str                         # Natural language: what to check
     viewport_width: int = 1280
     viewport_height: int = 720
+    setup_commands: list[str] = Field(default_factory=list)    # Commands to run on HOST before screenshot
+    teardown_commands: list[str] = Field(default_factory=list) # Commands to run on HOST after screenshot
 
 class RalphConfig(BaseModel):
     """Root configuration loaded from a global config file."""
@@ -823,6 +825,22 @@ The bash script and containers communicate via files in `.ralph-tmp/` (inside th
   "command": "verify",
   "task_id": "01",
   "commands": ["./bin/run-tests tests/path/to/test.py"]
+}
+
+// command: "visual"
+{
+  "command": "visual",
+  "task_id": "01",
+  "image": "ralph-loop-copilot",
+  "model": "claude-opus-4-6",
+  "timeout_seconds": 300,
+  "extra_flags": [],
+  "setup_commands": ["docker compose up -d myservice", "sleep 3"],
+  "teardown_commands": ["docker compose stop myservice"],
+  "auth": {
+    "env": [],
+    "mount": ["~/.config/gh"]
+  }
 }
 
 // command: "inspect"  
@@ -1532,7 +1550,7 @@ On retry, ALL accumulated feedback is injected into the coder prompt so the AI s
 ## Verification Pipeline
 
 1. **Deterministic** (`verify_commands`): run ALL commands on HOST, collect all stdout/stderr/exit_codes. Do NOT stop on first failure.
-2. **Visual** (optional, `visual_verify`): take screenshot via Playwright/MCP and validate with AI backend (with or without reference image).
+2. **Visual** (optional, `visual_verify`): run `setup_commands` on HOST (e.g., start services), take screenshot via Playwright inside container (with `--add-host=host.docker.internal:host-gateway` and automatic `localhost` → `host.docker.internal` URL rewriting), validate with AI backend (with or without reference image), then run `teardown_commands` on HOST.
 3. **AI Inspection** (always): capture `git diff`, build inspection prompt with diff + acceptance criteria + contract + previous feedback, execute via inspector backend, parse pass/fail verdict.
 4. **Aggregate**: all pass → PASS; any fail → FAIL with accumulated feedback entries.
 

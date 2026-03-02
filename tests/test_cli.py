@@ -873,3 +873,35 @@ def test_run_command_returns_loop_exit_code(sample_workspace: Path, monkeypatch)
     result = runner.invoke(main, ["run", "--config", str(config_path), "--sandbox", "none"])
 
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Config resolution via CLI (no --config flag)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_uses_local_config_when_no_flag(sample_workspace: Path, monkeypatch) -> None:
+    """CLI picks up ralph-config.yaml from CWD when --config is omitted."""
+    monkeypatch.delenv("RALPH_CONFIG", raising=False)
+    monkeypatch.chdir(sample_workspace)
+    monkeypatch.setattr("ralph_loop.config._get_repo_root", lambda: None)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["status"])
+    assert result.exit_code == 0
+    assert "ralph-loop status" in result.output
+
+
+def test_cli_error_when_no_config_found(tmp_path: Path, monkeypatch) -> None:
+    """CLI shows clear error with attempted paths when no config exists."""
+    monkeypatch.delenv("RALPH_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("ralph_loop.config._get_repo_root", lambda: None)
+
+    fake_global = tmp_path / "nope" / "config.yaml"
+    monkeypatch.setattr("ralph_loop.config.GLOBAL_CONFIG_PATH", Path(str(fake_global)))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["status"])
+    assert result.exit_code != 0
+    assert "No ralph-loop config file found" in result.output

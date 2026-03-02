@@ -16,7 +16,12 @@ from jinja2 import Template
 from pydantic import BaseModel, Field, ValidationError
 
 from ralph_loop.backends import get_backend
-from ralph_loop.config import RalphConfig, VisualVerifyConfig
+from ralph_loop.config import (
+    ConfigNotFoundError,
+    RalphConfig,
+    VisualVerifyConfig,
+    resolve_config_path,
+)
 from ralph_loop.loop import run_loop
 from ralph_loop.progress import (
     FeedbackEntry,
@@ -37,10 +42,14 @@ from ralph_loop.verification.visual import run_visual_verification
 
 
 def _default_config_path() -> str:
-    configured = os.environ.get("RALPH_CONFIG")
-    if configured:
-        return configured
-    return str((Path.home() / ".config" / "ralph-loop" / "config.yaml").resolve())
+    """Resolve config path using the precedence chain.
+
+    Called by Click as the default for ``--config`` when no explicit value is given.
+    """
+    try:
+        return resolve_config_path()
+    except ConfigNotFoundError as exc:
+        raise click.UsageError(str(exc)) from exc
 
 
 def _load_config(config_path: str, loop_dir: str = ".") -> RalphConfig:

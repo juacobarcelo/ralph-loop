@@ -18,13 +18,15 @@ If your `ralph-config.yaml` is in the repository root, and your plan is under `P
 ./ralph-loop init --from PRD/extractor_frames_desde_video/plan.md
 
 # 2) Execute loop against the generated loop directory
-./ralph-loop run PRD/extractor_frames_desde_video/.ralph-loop
+./ralph-loop run PRD/extractor_frames_desde_video/.ralph-loop/<plan-slug>
 ```
+
+If `PRD/.../.ralph-loop/` contains exactly one generated plan, you can pass the parent directory and `ralph-loop` auto-selects it.
 
 Equivalent explicit form:
 
 ```bash
-CONFIG=ralph-config.yaml LOOP_DIR=PRD/extractor_frames_desde_video/.ralph-loop ./ralph-loop run
+CONFIG=ralph-config.yaml LOOP_DIR=PRD/extractor_frames_desde_video/.ralph-loop/<plan-slug> ./ralph-loop run
 ```
 
 Use the same `LOOP_DIR` for status/validation:

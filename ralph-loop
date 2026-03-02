@@ -225,10 +225,54 @@ build_backend_args() {
     done < <(jq -r '.extra_flags[]? // empty' "$RALPH_TMP/next-action.json")
 }
 
+resolve_loop_dir_from_argument() {
+    local loop_dir_input="$1"
+    local normalized="${loop_dir_input%/}"
+    local candidates=()
+    local candidate_dirs=()
+    local progress_path=""
+
+    if [[ -z "$normalized" ]]; then
+        normalized="$loop_dir_input"
+    fi
+
+    progress_path="$normalized/PROGRESS.yaml"
+    if [[ -f "$progress_path" ]]; then
+        LOOP_DIR="$normalized"
+        return
+    fi
+
+    if [[ -d "$normalized" ]]; then
+        while IFS= read -r found; do
+            candidates+=("$found")
+        done < <(find "$normalized" -mindepth 2 -maxdepth 2 -type f -name "PROGRESS.yaml" 2>/dev/null)
+
+        if [[ ${#candidates[@]} -eq 1 ]]; then
+            LOOP_DIR="$(dirname "${candidates[0]}")"
+            log_warn "'$normalized' has no PROGRESS.yaml; auto-selected '$LOOP_DIR'"
+            return
+        fi
+
+        if [[ ${#candidates[@]} -gt 1 ]]; then
+            log_error "Loop dir '$normalized' is ambiguous (multiple plans found)."
+            log_error "Use one of these specific loop directories:"
+            for candidate in "${candidates[@]}"; do
+                candidate_dirs+=("$(dirname "$candidate")")
+            done
+            for dir in "${candidate_dirs[@]}"; do
+                log_error "  - $dir"
+            done
+            exit 1
+        fi
+    fi
+
+    LOOP_DIR="$normalized"
+}
+
 cmd_run() {
     local args=("$@")
     if [[ ${#args[@]} -gt 0 && "${args[0]}" != -* ]]; then
-        LOOP_DIR="${args[0]}"
+        resolve_loop_dir_from_argument "${args[0]}"
         args=("${args[@]:1}")
     fi
     if [[ ${#args[@]} -gt 0 ]]; then
@@ -371,7 +415,7 @@ cmd_run() {
 cmd_status() {
     local args=("$@")
     if [[ ${#args[@]} -gt 0 && "${args[0]}" != -* ]]; then
-        LOOP_DIR="${args[0]}"
+        resolve_loop_dir_from_argument "${args[0]}"
         args=("${args[@]:1}")
     fi
     if [[ ${#args[@]} -gt 0 ]]; then
@@ -414,7 +458,7 @@ cmd_init() {
 cmd_validate() {
     local args=("$@")
     if [[ ${#args[@]} -gt 0 && "${args[0]}" != -* ]]; then
-        LOOP_DIR="${args[0]}"
+        resolve_loop_dir_from_argument "${args[0]}"
         args=("${args[@]:1}")
     fi
     if [[ ${#args[@]} -gt 0 ]]; then

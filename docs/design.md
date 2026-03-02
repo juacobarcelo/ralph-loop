@@ -2094,7 +2094,7 @@ Not a Python CLI command — handled by the bash script directly.
 | `.ralph-tmp/` exists from previous run | Cleared by bash script at startup (`rm -rf .ralph-tmp && mkdir .ralph-tmp`) |
 | SIGINT (Ctrl+C) during loop | Bash trap cleans up `.ralph-tmp/`, exits with 130 |
 | SIGTERM | Same as SIGINT |
-| Task locked (IN_PROGRESS) at startup | If iteration-state.json exists, resume mid-iteration; otherwise reset to FAILED |
+| Task locked (IN_PROGRESS) at startup | Prompt user to recover (reset to FAILED) or abort the loop |
 | Concurrent runs | Not supported; `.ralph-tmp/` acts as implicit lock. Second run detects existing dir and warns. |
 
 ---

@@ -1175,6 +1175,54 @@ def test_next_action_returns_abort_when_any_task_is_aborted(
     assert payload["task_id"] == "01"
 
 
+def test_next_action_returns_orphan_when_task_is_in_progress(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    progress_path = sample_workspace / "PROGRESS.yaml"
+
+    progress = load_progress(str(progress_path))
+    progress.phases[0].tasks[0].status = TaskStatus.IN_PROGRESS
+    save_progress(progress, str(progress_path))
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["next-action", "--config", str(config_path)])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["command"] == "orphan"
+    assert payload["task_ids"] == ["01"]
+
+
+def test_recover_command_resets_orphan_task_to_failed(sample_workspace: Path) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    progress_path = sample_workspace / "PROGRESS.yaml"
+
+    progress = load_progress(str(progress_path))
+    progress.phases[0].tasks[0].status = TaskStatus.IN_PROGRESS
+    progress.phases[0].tasks[0].retries = 1
+    save_progress(progress, str(progress_path))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["recover", "--config", str(config_path), "--task-id", "all"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["recovered"] == ["01"]
+
+    updated = load_progress(str(progress_path))
+    assert updated.phases[0].tasks[0].status == TaskStatus.FAILED
+    assert updated.phases[0].tasks[0].retries == 1
+
+
 def test_update_command_fails_task_when_visual_step_fails(sample_workspace: Path) -> None:
     config_path = sample_workspace / "ralph-config.yaml"
     config = RalphConfig.load(str(config_path))

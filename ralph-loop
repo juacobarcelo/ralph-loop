@@ -298,6 +298,20 @@ cmd_run() {
         log_info "Next action: $COMMAND (task: $TASK_ID)"
 
         case "$COMMAND" in
+            orphan)
+                TASK_IDS=$(jq -r '.task_ids[]? // empty' "$RALPH_TMP/next-action.json" | paste -sd ', ' -)
+                [[ -z "$TASK_IDS" ]] && TASK_IDS="unknown"
+                log_warn "Detected orphan in-progress tasks: $TASK_IDS"
+                printf "[ralph] Recover orphan tasks and continue? [y/N]: "
+                read -r RECOVER_ORPHAN
+                if [[ "$RECOVER_ORPHAN" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+                    run_base recover --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR" --task-id all >/dev/null
+                    log_info "Recovered orphan tasks. Continuing loop..."
+                    continue
+                fi
+                log_error "Loop aborted by user due to orphan in-progress tasks."
+                cleanup 1
+                ;;
             code)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
                 build_backend_args

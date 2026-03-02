@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ralph_loop.progress import (
     FeedbackEntry,
     Progress,
@@ -9,8 +11,10 @@ from ralph_loop.progress import (
     advance_phase,
     complete_task,
     fail_task,
+    find_in_progress_tasks,
     load_progress,
     lock_task,
+    recover_in_progress_task,
     save_progress,
     select_next_task,
 )
@@ -57,3 +61,39 @@ def test_advance_phase_false_when_single_phase(sample_workspace: Path) -> None:
     lock_task(progress, "01")
     complete_task(progress, "01")
     assert advance_phase(progress) is False
+
+
+def test_find_in_progress_tasks_returns_locked_tasks(sample_workspace: Path) -> None:
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    lock_task(progress, "01")
+
+    locked = find_in_progress_tasks(progress)
+
+    assert [task.id for task in locked] == ["01"]
+
+
+def test_recover_in_progress_task_to_failed(sample_workspace: Path) -> None:
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    lock_task(progress, "01")
+
+    recover_in_progress_task(progress, "01", max_retries=3)
+
+    assert progress.phases[0].tasks[0].status == TaskStatus.FAILED
+
+
+def test_recover_in_progress_task_to_abort_when_retries_exhausted(sample_workspace: Path) -> None:
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    task = progress.phases[0].tasks[0]
+    task.status = TaskStatus.IN_PROGRESS
+    task.retries = 3
+
+    recover_in_progress_task(progress, "01", max_retries=3)
+
+    assert progress.phases[0].tasks[0].status == TaskStatus.ABORT
+
+
+def test_recover_in_progress_task_rejects_non_in_progress(sample_workspace: Path) -> None:
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+
+    with pytest.raises(ValueError):
+        recover_in_progress_task(progress, "01", max_retries=3)

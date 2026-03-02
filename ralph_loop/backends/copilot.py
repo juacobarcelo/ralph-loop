@@ -20,12 +20,11 @@ class CopilotBackend:
         extra_flags: list[str] | None = None,
         cwd: str | None = None,
     ) -> ExecutionResult:
-        command = ["copilot", "-p", "--allow-all-tools"]
+        command = ["copilot", "--allow-all-tools", "--prompt", prompt]
         if model:
             command.extend(["--model", model])
         if extra_flags:
             command.extend(extra_flags)
-        command.append(prompt)
         wrapped = ["timeout", str(timeout_seconds)] + command
 
         start = time.monotonic()

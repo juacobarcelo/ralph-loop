@@ -32,7 +32,7 @@ ralph-loop takes a list of coding tasks (markdown files with YAML frontmatter) a
 - **Multi-model per task phase** — use different AI backends for coding vs. inspection (e.g., Codex codes, Copilot reviews).
 - **Feedback accumulation across retries** — every failed attempt appends structured feedback to the next prompt, so the AI learns from previous mistakes.
 - **AI-powered diff inspection** — an inspector backend reviews the git diff against acceptance criteria and returns a pass/fail verdict.
-- **Visual screenshot verification** — optional Playwright-based screenshot capture compared against reference images via AI.
+- **Visual screenshot verification** — optional Playwright-based screenshot capture reviewed by AI, with or without a reference image.
 - **Run ALL verifiers every attempt** — deterministic tests, AI inspection, and visual checks all run regardless of individual failures, maximizing signal per retry.
 - **Docker-isolated per-backend containers** — each AI CLI runs in its own container with only the credentials it needs. No Docker socket mount.
 - **Plan-to-tasks generation** — convert a markdown plan into structured task files and a PROGRESS.yaml tracker, using AI or a deterministic fallback.
@@ -181,6 +181,61 @@ Progress: 1/4 completed, 1 in progress, 2 not started
 
 ---
 
+## E2E Example (Copilot + `./tmp`)
+
+Use the committed example design in `example/` and keep all generated cycle state under `./tmp/`.
+
+### Prerequisites
+
+- Build required images:
+
+```bash
+docker build --target base -t ralph-loop-base .
+docker build --target copilot -t ralph-loop-copilot .
+```
+
+- Ensure GitHub CLI auth is available for Copilot:
+
+```bash
+gh auth status
+```
+
+### 1. Prepare temporary workspace
+
+```bash
+rm -rf ./tmp
+mkdir -p ./tmp/product
+```
+
+### 2. Generate tasks and progress into `./tmp/`
+
+```bash
+./ralph-loop init \
+  --from example/copilot-e2e-plan.md \
+  --config example/ralph-config.copilot.yaml
+```
+
+This creates:
+
+- `./tmp/PROGRESS.yaml`
+- `./tmp/tasks/*.md`
+
+### 3. Validate and run the cycle
+
+```bash
+CONFIG=example/ralph-config.copilot.yaml ./ralph-loop validate
+CONFIG=example/ralph-config.copilot.yaml ./ralph-loop run
+CONFIG=example/ralph-config.copilot.yaml ./ralph-loop status
+```
+
+The generated product and tests are written under `./tmp/product/`, and deterministic verification runs with:
+
+```bash
+python -m pytest -q ./tmp/product/tests
+```
+
+---
+
 ## Architecture
 
 ```
@@ -266,7 +321,7 @@ auth:
     mount: ["~/.config/gh"]
 ```
 
-The `~/.config/gh` directory contains your GitHub session tokens and is mounted read-only into Docker containers. No environment variables are needed.
+The `~/.config/gh` directory contains your GitHub session tokens and is mounted into Docker containers so `gh`/Copilot can reuse your existing host login. No environment variables are needed.
 
 > **Tip:** Verify your session with `gh auth status` before starting a loop.
 
@@ -306,7 +361,7 @@ auth:
 The `auth` section in `ralph-config.yaml` controls what gets passed into Docker containers:
 
 - **`env`** — environment variables forwarded with `-e`. If the variable is set on the host, it's injected into the container. If not set, it's silently skipped.
-- **`mount`** — host directories mounted read-only with `-v path:path:ro`. Paths support `~` expansion. If the directory doesn't exist, it's skipped.
+- **`mount`** — host directories mounted with `-v path:path`. Paths support `~` expansion. If the directory doesn't exist, it's skipped.
 
 ```yaml
 auth:
@@ -383,7 +438,7 @@ Every attempt runs **all three** verification stages — even if earlier stages 
 |---|---|---|
 | **Deterministic** | Runs `verify_commands` via `bash -lc`, collects exit codes + output | Always |
 | **AI Inspection** | Sends git diff + criteria to inspector backend, expects `{"verdict":"pass\|fail","feedback":"..."}` | Always |
-| **Visual** | Screenshot via Playwright, AI comparison against reference image | When `visual_verify` is configured |
+| **Visual** | Screenshot via Playwright, AI review of screenshot (optional reference image) | When `visual_verify` is configured |
 
 ---
 

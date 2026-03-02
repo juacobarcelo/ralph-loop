@@ -213,3 +213,115 @@ demo
 
     assert result.verdict == "pass"
     assert "visual matches" in result.details
+
+
+def test_visual_verification_resolves_reference_from_workspace_ancestors(
+    monkeypatch, tmp_path
+) -> None:
+    task_file = tmp_path / "task.md"
+    task_file.write_text(
+        """---
+phase: 1
+verify_commands: []
+files_to_touch: []
+files_not_to_touch: []
+---
+
+# Task 01
+
+## Description
+
+demo
+""",
+        encoding="utf-8",
+    )
+    task = Task.load(str(task_file))
+
+    workspace_dir = tmp_path / "tmp" / "product"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    reference = workspace_dir / "references" / "mini-calc-home.jpg"
+    reference.parent.mkdir(parents=True, exist_ok=True)
+    reference.write_bytes(b"reference")
+
+    screenshot = workspace_dir / ".ralph-tmp" / "visual" / "current.jpg"
+    screenshot.parent.mkdir(parents=True, exist_ok=True)
+    screenshot.write_bytes(b"current")
+
+    monkeypatch.setattr(
+        "ralph_loop.verification.visual._capture_screenshot",
+        lambda config, workspace: SimpleNamespace(path=screenshot, error=None),
+    )
+
+    backend = _FakeInspectorBackend('{"verdict":"pass","feedback":"resolved"}')
+    result = run_visual_verification(
+        config=VisualVerifyConfig(
+            type="screenshot",
+            url="http://localhost:3000",
+            reference="tmp/product/references/mini-calc-home.jpg",
+            assertion="Homepage layout matches",
+            viewport_width=1280,
+            viewport_height=720,
+        ),
+        workspace_dir=str(workspace_dir),
+        backend=backend,
+        model="claude-opus",
+        timeout_seconds=60,
+        extra_flags=[],
+        task=task,
+    )
+
+    assert result.verdict == "pass"
+    assert "resolved" in result.details
+
+
+def test_visual_verification_without_reference_uses_single_screenshot(
+    monkeypatch, tmp_path
+) -> None:
+    task_file = tmp_path / "task.md"
+    task_file.write_text(
+        """---
+phase: 1
+verify_commands: []
+files_to_touch: []
+files_not_to_touch: []
+---
+
+# Task 01
+
+## Description
+
+demo
+""",
+        encoding="utf-8",
+    )
+    task = Task.load(str(task_file))
+
+    screenshot = tmp_path / ".ralph-tmp" / "visual" / "current.jpg"
+    screenshot.parent.mkdir(parents=True, exist_ok=True)
+    screenshot.write_bytes(b"current")
+
+    monkeypatch.setattr(
+        "ralph_loop.verification.visual._capture_screenshot",
+        lambda config, workspace: SimpleNamespace(path=screenshot, error=None),
+    )
+
+    backend = _FakeInspectorBackend('{"verdict":"pass","feedback":"single screenshot ok"}')
+    result = run_visual_verification(
+        config=VisualVerifyConfig(
+            type="screenshot",
+            url="http://localhost:3000",
+            reference=None,
+            assertion="Page has a visible Mini Calc heading",
+            viewport_width=1280,
+            viewport_height=720,
+        ),
+        workspace_dir=str(tmp_path),
+        backend=backend,
+        model="claude-opus",
+        timeout_seconds=60,
+        extra_flags=[],
+        task=task,
+    )
+
+    assert result.verdict == "pass"
+    assert "single screenshot ok" in result.details

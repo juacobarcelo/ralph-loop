@@ -18,6 +18,14 @@ Schema:
           "test_plan": "string",
           "priority": "high|medium|low",
           "verify_commands": ["string"],
+          "visual_verify": {
+            "type": "screenshot",
+            "url": "string",
+            "reference": "string|null",
+            "assertion": "string",
+            "viewport_width": 1280,
+            "viewport_height": 720
+          } | null,
           "files_to_touch": ["string"],
           "files_not_to_touch": ["string"],
           "constraints": ["string"],
@@ -31,7 +39,11 @@ Schema:
 Rules:
 - Create concrete, testable tasks.
 - Use 1+ phases and at least 1 task per phase.
-- Keep verify_commands empty when unknown.
+- Include `verify_commands` whenever the plan provides runnable checks.
+- `verify_commands` run with working directory already set to the project `workspace_dir`.
+- Do not prefix `verify_commands` with `cd tmp/product` (or any `cd` to the workspace path).
+- Include `visual_verify` for tasks that explicitly require visual checks.
+- If visual verification should inspect only the current screenshot, set `visual_verify.reference` to `null`.
 - Output valid JSON with double quotes only.
 
 {% if project_instructions %}

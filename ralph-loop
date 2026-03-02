@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RALPH_TMP=".ralph-tmp"
 CONFIG="${CONFIG:-ralph-config.yaml}"
 DOCKER_USER="$(id -u):$(id -g)"
+SOURCE_EPOCH_CACHE=""
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log_info()  { echo -e "${GREEN}[ralph]${NC} $*"; }
@@ -20,10 +21,65 @@ trap 'cleanup 130' INT TERM
 ensure_image() {
     local target="$1"
     local image="ralph-loop-${target}"
-    if ! docker image inspect "$image" >/dev/null 2>&1; then
-        log_info "Building $image..."
+    local should_build="0"
+    local reason=""
+
+    if [[ "${REBUILD_IMAGES:-0}" == "1" ]]; then
+        should_build="1"
+        reason="REBUILD_IMAGES=1"
+    elif ! docker image inspect "$image" >/dev/null 2>&1; then
+        should_build="1"
+        reason="missing image"
+    elif image_is_stale "$image"; then
+        should_build="1"
+        reason="source changed"
+    fi
+
+    if [[ "$should_build" == "1" ]]; then
+        log_info "Building $image ($reason)..."
         docker build --target "$target" -t "$image" "$SCRIPT_DIR" --quiet
     fi
+}
+
+get_source_epoch() {
+    if [[ -n "$SOURCE_EPOCH_CACHE" ]]; then
+        echo "$SOURCE_EPOCH_CACHE"
+        return
+    fi
+
+    local latest_epoch
+    latest_epoch=$(
+        {
+            find "$SCRIPT_DIR/ralph_loop" "$SCRIPT_DIR/docker" -type f -printf '%T@\n' 2>/dev/null
+            find "$SCRIPT_DIR" -maxdepth 1 -type f \
+                \( -name "Dockerfile" -o -name "pyproject.toml" -o -name "ralph-loop" \) \
+                -printf '%T@\n' 2>/dev/null
+        } | sort -nr | head -1 | cut -d. -f1
+    )
+
+    if [[ -z "$latest_epoch" ]]; then
+        latest_epoch=0
+    fi
+
+    SOURCE_EPOCH_CACHE="$latest_epoch"
+    echo "$SOURCE_EPOCH_CACHE"
+}
+
+image_is_stale() {
+    local image="$1"
+    local created_iso
+    local created_epoch
+    local source_epoch
+
+    created_iso=$(docker image inspect "$image" --format '{{.Created}}' 2>/dev/null || true)
+    if [[ -z "$created_iso" ]]; then
+        return 0
+    fi
+
+    created_epoch=$(date -d "$created_iso" +%s 2>/dev/null || echo 0)
+    source_epoch=$(get_source_epoch)
+
+    [[ "$source_epoch" -gt "$created_epoch" ]]
 }
 
 run_base() {
@@ -33,6 +89,7 @@ run_base() {
 run_cli() {
     local image="$1"; shift
     local auth_env=() auth_mount=()
+    local container_home="/home/ralph"
 
     while IFS= read -r env_var; do
         [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
@@ -40,15 +97,73 @@ run_cli() {
 
     while IFS= read -r mount_path; do
         expanded="${mount_path/#\~/$HOME}"
-        [[ -d "$expanded" ]] && auth_mount+=("-v" "${expanded}:${expanded}:ro")
+        if [[ -d "$expanded" ]]; then
+            if [[ "$mount_path" == "~/"* ]]; then
+                container_target="${container_home}/${mount_path:2}"
+            else
+                container_target="$expanded"
+            fi
+            auth_mount+=("-v" "${expanded}:${container_target}")
+        fi
     done < <(jq -r '.auth.mount[]? // empty' "$RALPH_TMP/next-action.json")
 
     docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
 }
 
 run_trusted_verify_cmd() {
+    local cwd="$1"
+    local cmd="$2"
+    (
+        cd "$cwd"
+        bash -lc "$cmd"
+    )
+}
+
+normalize_verify_cmd() {
     local cmd="$1"
-    bash -lc "$cmd"
+    local workspace_raw="$2"
+    local workspace_rel=""
+    local prefixes=()
+
+    if [[ "$workspace_raw" == /workspace/* ]]; then
+        workspace_rel="${workspace_raw#/workspace/}"
+    fi
+
+    prefixes+=("cd $workspace_raw && " "cd \"$workspace_raw\" && " "cd '$workspace_raw' && ")
+
+    if [[ -n "$workspace_rel" ]]; then
+        prefixes+=(
+            "cd $workspace_rel && "
+            "cd ./$workspace_rel && "
+            "cd \"$workspace_rel\" && "
+            "cd \"./$workspace_rel\" && "
+            "cd '$workspace_rel' && "
+            "cd './$workspace_rel' && "
+            "cd /workspace/$workspace_rel && "
+        )
+    fi
+
+    for prefix in "${prefixes[@]}"; do
+        if [[ "$cmd" == "$prefix"* ]]; then
+            echo "${cmd#$prefix}"
+            return
+        fi
+    done
+
+    echo "$cmd"
+}
+
+container_path_to_host_path() {
+    local path="$1"
+    if [[ "$path" == "/workspace" ]]; then
+        echo "$PWD"
+        return
+    fi
+    if [[ "$path" == /workspace/* ]]; then
+        echo "$PWD/${path#/workspace/}"
+        return
+    fi
+    echo "$path"
 }
 
 build_backend_args() {
@@ -74,73 +189,119 @@ cmd_run() {
 
     rm -rf "$RALPH_TMP"
     mkdir -p "$RALPH_TMP"
+    log_info "Using config: $CONFIG"
+    log_info "Starting ralph loop..."
 
     while true; do
         run_base next-action --config "/workspace/$CONFIG" --step-result "/workspace/$RALPH_TMP/step-result.json" > "$RALPH_TMP/next-action.json"
         COMMAND=$(jq -r '.command' "$RALPH_TMP/next-action.json")
         TASK_ID=$(jq -r '.task_id // "n/a"' "$RALPH_TMP/next-action.json")
+        log_info "Next action: $COMMAND (task: $TASK_ID)"
 
         case "$COMMAND" in
             code)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
                 build_backend_args
+                log_info "Task $TASK_ID: coding via $IMAGE..."
                 set +e
                 SECONDS=0
                 run_cli "$IMAGE" execute \
-                    --prompt-file "/workspace/$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")" \
+                    --prompt-file "$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")" \
                     "${BACKEND_ARGS[@]}"
                 EXIT_CODE=$?
                 DURATION=$SECONDS
                 set -e
+                log_info "Task $TASK_ID: code finished in ${DURATION}s (exit $EXIT_CODE)"
                 jq -n --arg task "$TASK_ID" --argjson exit "$EXIT_CODE" --argjson dur "$DURATION" '{step:"code",task_id:$task,exit_code:$exit,duration_seconds:$dur}' > "$RALPH_TMP/step-result.json"
                 ;;
             verify)
+                log_info "Task $TASK_ID: running verification commands on host..."
+                VERIFY_CWD_RAW=$(jq -r '.workspace_dir // "/workspace"' "$RALPH_TMP/next-action.json")
+                VERIFY_CWD=$(container_path_to_host_path "$VERIFY_CWD_RAW")
+                log_info "Task $TASK_ID: verify cwd -> $VERIFY_CWD"
                 RESULTS="[]"
                 while IFS= read -r cmd; do
+                    EFFECTIVE_CMD=$(normalize_verify_cmd "$cmd" "$VERIFY_CWD_RAW")
+                    if [[ "$EFFECTIVE_CMD" != "$cmd" ]]; then
+                        log_info "Task $TASK_ID: normalized verify command -> $EFFECTIVE_CMD"
+                    fi
+                    log_info "Task $TASK_ID: verify command -> $EFFECTIVE_CMD"
+                    VERIFY_STDOUT_FILE="$RALPH_TMP/verify-stdout.txt"
+                    VERIFY_STDERR_FILE="$RALPH_TMP/verify-stderr.txt"
+                    : > "$VERIFY_STDOUT_FILE"
+                    : > "$VERIFY_STDERR_FILE"
                     set +e
-                    OUTPUT=$(run_trusted_verify_cmd "$cmd" 2>&1)
+                    run_trusted_verify_cmd "$VERIFY_CWD" "$EFFECTIVE_CMD" \
+                        > >(tee "$VERIFY_STDOUT_FILE") \
+                        2> >(tee "$VERIFY_STDERR_FILE" >&2)
                     CMD_EXIT=$?
                     set -e
+                    STDOUT=$(cat "$VERIFY_STDOUT_FILE")
+                    STDERR=$(cat "$VERIFY_STDERR_FILE")
+                    OUTPUT="${STDOUT}"$'\n'"${STDERR}"
                     TRUNCATED=$(echo "$OUTPUT" | tail -c 4000)
-                    RESULTS=$(echo "$RESULTS" | jq --arg cmd "$cmd" --argjson exit "$CMD_EXIT" --arg out "$TRUNCATED" '. + [{command:$cmd,exit_code:$exit,stdout:$out,stderr:""}]')
+                    RESULTS=$(echo "$RESULTS" | jq --arg cmd "$EFFECTIVE_CMD" --argjson exit "$CMD_EXIT" --arg out "$TRUNCATED" '. + [{command:$cmd,exit_code:$exit,stdout:$out,stderr:""}]')
+                    log_info "Task $TASK_ID: verify command exit $CMD_EXIT"
                 done < <(jq -r '.commands[]' "$RALPH_TMP/next-action.json")
                 jq -n --arg task "$TASK_ID" --argjson results "$RESULTS" '{step:"verify",task_id:$task,results:$results}' > "$RALPH_TMP/step-result.json"
                 ;;
             inspect)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
                 build_backend_args
+                log_info "Task $TASK_ID: AI inspection via $IMAGE..."
+                INSPECT_STDOUT_FILE="$RALPH_TMP/inspect-stdout.txt"
+                INSPECT_STDERR_FILE="$RALPH_TMP/inspect-stderr.txt"
+                : > "$INSPECT_STDOUT_FILE"
+                : > "$INSPECT_STDERR_FILE"
                 set +e
-                STDOUT=$(run_cli "$IMAGE" inspect \
-                    --prompt-file "/workspace/$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")" \
-                    "${BACKEND_ARGS[@]}")
+                run_cli "$IMAGE" inspect \
+                    --prompt-file "$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")" \
+                    "${BACKEND_ARGS[@]}" \
+                    > >(tee "$INSPECT_STDOUT_FILE") \
+                    2> >(tee "$INSPECT_STDERR_FILE" >&2)
                 EXIT_CODE=$?
                 set -e
+                STDOUT=$(cat "$INSPECT_STDOUT_FILE")
+                log_info "Task $TASK_ID: inspect finished (exit $EXIT_CODE)"
                 jq -n --arg task "$TASK_ID" --argjson exit "$EXIT_CODE" --arg out "$STDOUT" '{step:"inspect",task_id:$task,exit_code:$exit,stdout:$out}' > "$RALPH_TMP/step-result.json"
                 ;;
             visual)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
                 build_backend_args
+                log_info "Task $TASK_ID: visual check via $IMAGE..."
+                VISUAL_STDOUT_FILE="$RALPH_TMP/visual-stdout.txt"
+                VISUAL_STDERR_FILE="$RALPH_TMP/visual-stderr.txt"
+                : > "$VISUAL_STDOUT_FILE"
+                : > "$VISUAL_STDERR_FILE"
                 set +e
-                STDOUT=$(run_cli "$IMAGE" visual \
+                run_cli "$IMAGE" visual \
                     --config "/workspace/$CONFIG" \
                     --task-id "$TASK_ID" \
-                    "${BACKEND_ARGS[@]}")
+                    "${BACKEND_ARGS[@]}" \
+                    > >(tee "$VISUAL_STDOUT_FILE") \
+                    2> >(tee "$VISUAL_STDERR_FILE" >&2)
                 EXIT_CODE=$?
                 set -e
+                STDOUT=$(cat "$VISUAL_STDOUT_FILE")
+                log_info "Task $TASK_ID: visual finished (exit $EXIT_CODE)"
                 jq -n --arg task "$TASK_ID" --argjson exit "$EXIT_CODE" --arg out "$STDOUT" '{step:"visual",task_id:$task,exit_code:$exit,stdout:$out}' > "$RALPH_TMP/step-result.json"
                 ;;
             update)
+                log_info "Task $TASK_ID: updating progress..."
                 run_base update --config "/workspace/$CONFIG" --result-dir "/workspace/$RALPH_TMP/"
                 ;;
             done)
-                log_info "Loop complete"
+                REASON=$(jq -r '.reason // "all_completed"' "$RALPH_TMP/next-action.json")
+                log_info "Loop complete: $REASON"
                 cleanup 0
                 ;;
             abort)
-                log_error "Task $TASK_ID aborted"
+                REASON=$(jq -r '.reason // "max_retries_reached"' "$RALPH_TMP/next-action.json")
+                log_error "Task $TASK_ID aborted: $REASON"
+                cleanup 1
                 ;;
             pause)
-                log_warn "Paused"
+                log_warn "Paused - remove PAUSE.md to resume."
                 sleep 30
                 ;;
             *)

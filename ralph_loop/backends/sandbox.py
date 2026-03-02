@@ -50,7 +50,11 @@ class SandboxBackend:
         for mount_path in self.auth.mount:
             expanded = Path(mount_path).expanduser().resolve()
             if expanded.exists():
-                command.extend(["-v", f"{expanded}:{expanded}:ro"])
+                if mount_path.startswith("~/"):
+                    container_target = Path("/home/ralph") / mount_path[2:]
+                else:
+                    container_target = expanded
+                command.extend(["-v", f"{expanded}:{container_target}"])
 
         for env_name in self.auth.env:
             env_value = os.environ.get(env_name)

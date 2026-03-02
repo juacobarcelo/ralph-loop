@@ -36,6 +36,30 @@ def test_codex_execute(monkeypatch) -> None:
     assert captured["cmd"][0] == "timeout"
 
 
+def test_copilot_execute_uses_prompt_flag(monkeypatch) -> None:
+    backend = get_backend("copilot")
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, cwd, check):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = backend.execute(
+        "hello world",
+        model="gpt-5",
+        timeout_seconds=10,
+        extra_flags=["--silent"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["cmd"][0] == "timeout"
+    assert "--prompt" in captured["cmd"]
+    assert "hello world" in captured["cmd"]
+    assert "--model" in captured["cmd"]
+    assert "gpt-5" in captured["cmd"]
+
+
 def test_sandbox_backend_builds_docker_command(monkeypatch, tmp_path) -> None:
     inner = get_backend("codex")
     auth = AuthConfig(env=["OPENAI_API_KEY"], mount=[str(tmp_path / "auth")])
@@ -71,7 +95,7 @@ def test_sandbox_backend_builds_docker_command(monkeypatch, tmp_path) -> None:
     assert "ralph-loop-codex" in captured["cmd"]
     assert "execute" in captured["cmd"]
     assert "OPENAI_API_KEY=secret" in captured["cmd"]
-    assert f"{auth_dir}:{auth_dir}:ro" in captured["cmd"]
+    assert f"{auth_dir}:{auth_dir}" in captured["cmd"]
     assert "/workspace/prompt.md" in captured["cmd"]
     assert "--model" in captured["cmd"]
     assert "gpt-5" in captured["cmd"]

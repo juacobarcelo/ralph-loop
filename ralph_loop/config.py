@@ -29,7 +29,7 @@ class VisualVerifyConfig(BaseModel):
 
     type: str = "screenshot"
     url: str
-    reference: str
+    reference: str | None = None
     assertion: str
     viewport_width: int = 1280
     viewport_height: int = 720

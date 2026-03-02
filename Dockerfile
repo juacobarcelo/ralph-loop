@@ -1,7 +1,7 @@
 FROM python:3.12-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git jq curl ca-certificates && \
+    git jq curl ca-certificates gh && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
@@ -10,7 +10,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
 
 COPY pyproject.toml README.md LICENSE /app/
 COPY ralph_loop/ /app/ralph_loop/
-RUN pip install --no-cache-dir /app
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN pip install --no-cache-dir "/app[visual]" && \
+    mkdir -p /ms-playwright && \
+    python -m playwright install --with-deps chromium && \
+    chmod -R a+rX /ms-playwright
 
 RUN useradd -m -u 1000 ralph
 USER ralph

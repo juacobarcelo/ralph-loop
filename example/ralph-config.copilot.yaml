@@ -1,0 +1,40 @@
+progress_file: ../tmp/PROGRESS.yaml
+task_dir: ../tmp/tasks/
+max_retries: 3
+pause_file: ../tmp/PAUSE.md
+workspace_dir: ../tmp/product
+
+backends:
+  coder:
+    engine: copilot
+    timeout_seconds: 900
+    extra_flags:
+      - --allow-all
+      - --allow-all-urls
+      - --enable-all-github-mcp-tools
+  inspector:
+    engine: copilot
+    timeout_seconds: 300
+    extra_flags:
+      - --allow-all
+      - --allow-all-urls
+      - --enable-all-github-mcp-tools
+  visual:
+    engine: copilot
+    timeout_seconds: 300
+    extra_flags:
+      - --allow-all
+      - --allow-all-urls
+      - --enable-all-github-mcp-tools
+      - --additional-mcp-config
+      - "@/workspace/example/copilot-mcp.chrome.json"
+
+verify_commands:
+  - "python -m pytest -q ./tmp/product/tests"
+
+auth:
+  copilot:
+    env: []
+    mount: ["~/.config/gh"]
+
+project_instructions: ../AGENTS.md

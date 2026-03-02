@@ -4,6 +4,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from jinja2 import Template
 from pydantic import BaseModel, ValidationError
@@ -44,12 +45,14 @@ def run_visual_verification(
         return VisualVerificationResult(verdict="pass", details="visual verification not configured")
 
     workspace = Path(workspace_dir).resolve()
-    reference_path = _resolve_reference_path(config.reference, workspace)
-    if not reference_path.exists():
-        return VisualVerificationResult(
-            verdict="fail",
-            details=f"visual reference image not found: {reference_path}",
-        )
+    reference_path: Path | None = None
+    if config.reference:
+        reference_path = _resolve_reference_path(config.reference, workspace)
+        if not reference_path.exists():
+            return VisualVerificationResult(
+                verdict="fail",
+                details=f"visual reference image not found: {reference_path}",
+            )
 
     screenshot_result = _capture_screenshot(config, workspace)
     if screenshot_result.error is not None:
@@ -123,7 +126,8 @@ def _capture_screenshot(config: VisualVerifyConfig, workspace: Path) -> _Screens
                     "height": config.viewport_height,
                 }
             )
-            page.goto(config.url, wait_until="networkidle")
+            target_url = _normalize_visual_target_url(config.url, workspace)
+            page.goto(target_url, wait_until="networkidle")
             page.screenshot(
                 path=str(screenshot_path),
                 full_page=True,
@@ -137,11 +141,47 @@ def _capture_screenshot(config: VisualVerifyConfig, workspace: Path) -> _Screens
     return _ScreenshotResult(path=screenshot_path)
 
 
-def _resolve_reference_path(reference: str, workspace: Path) -> Path:
-    candidate = Path(reference)
+def _normalize_visual_target_url(raw_url: str, workspace: Path) -> str:
+    parsed = urlparse(raw_url)
+    if parsed.scheme in {"http", "https", "data"}:
+        return raw_url
+
+    if parsed.scheme == "file":
+        path_value = _extract_file_url_path(parsed)
+        return _resolve_local_path(path_value, workspace).as_uri()
+
+    if parsed.scheme:
+        return raw_url
+
+    return _resolve_local_path(raw_url, workspace).as_uri()
+
+
+def _extract_file_url_path(parsed: object) -> str:
+    # Keep helper narrow and local for predictable file:// normalization.
+    file_parsed = parsed
+    netloc = str(getattr(file_parsed, "netloc", "")).strip()
+    path = str(getattr(file_parsed, "path", "")).strip()
+
+    if netloc and netloc != "localhost":
+        return f"{netloc}{path}"
+    return path
+
+
+def _resolve_local_path(path_value: str, workspace: Path) -> Path:
+    candidate = Path(path_value).expanduser()
     if candidate.is_absolute():
         return candidate.resolve()
+
+    for base in (workspace, *workspace.parents):
+        resolved = (base / candidate).resolve()
+        if resolved.exists():
+            return resolved
+
     return (workspace / candidate).resolve()
+
+
+def _resolve_reference_path(reference: str, workspace: Path) -> Path:
+    return _resolve_local_path(reference, workspace)
 
 
 def _render_visual_prompt(
@@ -150,7 +190,7 @@ def _render_visual_prompt(
     config: VisualVerifyConfig,
     workspace: Path,
     screenshot_path: Path,
-    reference_path: Path,
+    reference_path: Path | None,
 ) -> str:
     template_path = Path(__file__).resolve().parents[1] / "prompts" / "visual.md.j2"
     template = Template(template_path.read_text(encoding="utf-8"))
@@ -160,7 +200,9 @@ def _render_visual_prompt(
         visual_config=config,
         workspace_dir=str(workspace),
         screenshot_path=_path_for_prompt(screenshot_path, workspace),
-        reference_path=_path_for_prompt(reference_path, workspace),
+        reference_path=(
+            _path_for_prompt(reference_path, workspace) if reference_path is not None else None
+        ),
     )
 
 

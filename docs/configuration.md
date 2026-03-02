@@ -15,7 +15,7 @@
 - `project_instructions` (optional path to `AGENTS.md`/`CLAUDE.md`)
 - `auth` map (`codex`, `copilot`, `claude`) with:
   - `env`: list of env vars to forward in Docker mode
-  - `mount`: list of host paths to mount read-only
+  - `mount`: list of host paths to mount inside backend containers
 
 ## Example
 

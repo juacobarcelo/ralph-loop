@@ -231,13 +231,13 @@ class BackendConfig(BaseModel):
 class AuthConfig(BaseModel):
     """Auth credentials forwarding for Docker containers."""
     env: list[str] = Field(default_factory=list)     # Env vars to forward: ["OPENAI_API_KEY"]
-    mount: list[str] = Field(default_factory=list)    # Host dirs to mount (ro): ["~/.config/gh"]
+    mount: list[str] = Field(default_factory=list)    # Host dirs to mount: ["~/.config/gh"]
 
 class VisualVerifyConfig(BaseModel):
     """Configuration for visual screenshot verification of a task."""
     type: str = "screenshot"               # "screenshot" | "diff_image"
     url: str                               # URL to capture
-    reference: str                         # Path to reference image (relative to workspace)
+    reference: str | None = None           # Optional path to reference image (relative to workspace)
     assertion: str                         # Natural language: what to check
     viewport_width: int = 1280
     viewport_height: int = 720
@@ -763,10 +763,10 @@ class SandboxBackend:
         cmd = ["docker", "run", "--rm"]
         cmd.extend(["-v", f"{self.workspace}:/workspace"])
         
-        # Mount auth directories (read-only)
+        # Mount auth directories
         for mount_path in self.auth.mount:
             expanded = os.path.expanduser(mount_path)
-            cmd.extend(["-v", f"{expanded}:{expanded}:ro"])
+            cmd.extend(["-v", f"{expanded}:{expanded}"])
         
         # Forward env vars
         for env_var in self.auth.env:
@@ -982,7 +982,7 @@ run_cli() {
     
     while IFS= read -r mount_path; do
         expanded="${mount_path/#\~/$HOME}"
-        [[ -d "$expanded" ]] && auth_mount+=("-v" "${expanded}:${expanded}:ro")
+        [[ -d "$expanded" ]] && auth_mount+=("-v" "${expanded}:${expanded}")
     done < <(jq -r '.auth.mount[]? // empty' "$RALPH_TMP/next-action.json")
     
     docker run --rm \
@@ -1369,7 +1369,7 @@ project_instructions: null              # Path to AGENTS.md/CLAUDE.md (injected 
 auth:                                   # Credential forwarding for Docker containers
   codex:
     env: [OPENAI_API_KEY]               # Env vars forwarded to container
-    mount: []                           # Host dirs mounted (read-only)
+    mount: []                           # Host dirs mounted into backend containers
   copilot:
     env: []
     mount: ["~/.config/gh"]
@@ -1526,7 +1526,7 @@ On retry, ALL accumulated feedback is injected into the coder prompt so the AI s
 ## Verification Pipeline
 
 1. **Deterministic** (`verify_commands`): run ALL commands on HOST, collect all stdout/stderr/exit_codes. Do NOT stop on first failure.
-2. **Visual** (optional, `visual_verify`): take screenshot via Playwright/MCP, compare with reference via AI backend.
+2. **Visual** (optional, `visual_verify`): take screenshot via Playwright/MCP and validate with AI backend (with or without reference image).
 3. **AI Inspection** (always): capture `git diff`, build inspection prompt with diff + acceptance criteria + contract + previous feedback, execute via inspector backend, parse pass/fail verdict.
 4. **Aggregate**: all pass → PASS; any fail → FAIL with accumulated feedback entries.
 
@@ -2064,9 +2064,9 @@ Not a Python CLI command — handled by the bash script directly.
 
 | Service | Credential Source | Mount/Env |
 |---|---|---|
-| GitHub Copilot | `~/.config/gh/` | Volume mount (ro) |
+| GitHub Copilot | `~/.config/gh/` | Volume mount |
 | OpenAI Codex | `OPENAI_API_KEY` | Env var |
-| Anthropic Claude | `~/.claude/` + `ANTHROPIC_API_KEY` | Volume mount (ro) + env var |
+| Anthropic Claude | `~/.claude/` + `ANTHROPIC_API_KEY` | Volume mount + env var |
 
 ---
 

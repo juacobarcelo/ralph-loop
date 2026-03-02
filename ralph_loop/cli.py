@@ -958,33 +958,7 @@ def status_command(config_path: str, loop_dir: str) -> None:
 def list_engines_command(config_path: str) -> None:
     """Print unique engine names from configured backend roles."""
     config = _load_config(config_path)
-    engines = sorted({backend.engine for backend in config.backends.values()})
     for engine in engines:
-        click.echo(engine)
-
-
-@main.command("init-engine")
-@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
-def init_engine_command(config_path: str) -> None:
-    """Print the engine used by `init` plan generation."""
-    config = _load_config(config_path)
-    role_backend = _select_init_backend(config)
-    click.echo(role_backend.engine)
-
-
-@main.command("auth-config")
-@click.option("--engine", required=True)
-@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
-def auth_config_command(engine: str, config_path: str) -> None:
-    """Print auth forwarding config for an engine as JSON."""
-    config = _load_config(config_path)
-    click.echo(json.dumps(config.get_auth(engine).model_dump()))
-
-
-@main.command("validate")
-@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
-@click.option("--loop-dir", default=".", show_default=True)
-def validate_command(config_path: str, loop_dir: str) -> None:
     """Validate consistency between config, progress, and task files."""
     config, progress = _load_config_and_progress(config_path, loop_dir)
 
@@ -1532,15 +1506,13 @@ def init_command(
         model_override=model,
     )
     if generated_plan is None:
-        click.echo("[init] AI generation unavailable/invalid. Using deterministic fallback parser.")
-        generated_plan = _fallback_plan(source_content, source.stem.replace("-", " ").title())
-        if user_directives:
-            generated_plan = _apply_plan_hints(
-                generated_plan, f"{source_content}\n\n{user_directives}"
-            )
-    else:
-        click.echo("[init] AI generation completed.")
-        generated_plan = _apply_plan_hints(generated_plan, f"{source_content}\n\n{user_directives}")
+        raise click.ClickException(
+            "AI generation unavailable or invalid backend output. "
+            "`init` requires AI generation and does not support deterministic fallback."
+        )
+
+    click.echo("[init] AI generation completed.")
+    generated_plan = _apply_plan_hints(generated_plan, f"{source_content}\n\n{user_directives}")
 
     click.echo("[init] Writing tasks and progress files...")
     count, task_dir, progress_path = _write_generated_artifacts(context, generated_plan)

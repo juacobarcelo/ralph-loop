@@ -64,7 +64,7 @@ ralph-loop takes a list of coding tasks (markdown files with YAML frontmatter) a
 - **Visual screenshot verification** — optional Playwright-based screenshot capture reviewed by AI, with or without a reference image.
 - **Run ALL verifiers every attempt** — deterministic tests, AI inspection, and visual checks all run regardless of individual failures, maximizing signal per retry.
 - **Docker-isolated per-backend containers** — each AI CLI runs in its own container with only the credentials it needs. No Docker socket mount.
-- **Plan-to-tasks generation** — convert a markdown plan into structured task files and a PROGRESS.yaml tracker, using AI or a deterministic fallback.
+- **Plan-to-tasks generation** — convert a markdown plan into structured task files and a PROGRESS.yaml tracker, using AI generation.
 - **Pause/resume** — drop a `PAUSE.md` file to pause the loop; remove it to resume.
 - **Retry-first scheduling** — failed tasks are retried before new tasks are started.
 - **Phase-based progression** — tasks are grouped into phases; the loop advances to the next phase when all tasks in the current phase are done or aborted.
@@ -168,7 +168,7 @@ This creates a dedicated loop directory next to the plan:
 - `.ralph-loop/<plan-slug>/PROGRESS.yaml`
 - `.ralph-loop/<plan-slug>/product/`
 
-It uses an AI backend to decompose your plan into structured, actionable tasks — or falls back to a deterministic parser if no backend is available.
+It uses an AI backend to decompose your plan into structured, actionable tasks.
 
 ### How to influence `init` generation (LLM steering contract)
 

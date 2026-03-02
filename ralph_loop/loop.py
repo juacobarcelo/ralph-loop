@@ -18,8 +18,10 @@ from ralph_loop.progress import (
     advance_phase,
     complete_task,
     fail_task,
+    find_in_progress_tasks,
     load_progress,
     lock_task,
+    recover_in_progress_task,
     save_progress,
     select_next_task,
 )
@@ -30,6 +32,10 @@ from ralph_loop.verification.pipeline import run_verification_pipeline
 def run_loop(config: RalphConfig, sandbox: str = "none") -> int:
     """Run native orchestration loop for configured tasks."""
     _setup_signal_handlers()
+    progress = load_progress(config.progress_file)
+    if not _handle_orphan_tasks(progress, config):
+        return 1
+    save_progress(progress, config.progress_file)
 
     while True:
         if Path(config.pause_file).exists():
@@ -159,3 +165,25 @@ def _setup_signal_handlers() -> None:
 
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
+
+
+def _handle_orphan_tasks(progress: Progress, config: RalphConfig) -> bool:
+    orphan_tasks = find_in_progress_tasks(progress)
+    if not orphan_tasks:
+        return True
+
+    task_ids = ", ".join(task.id for task in orphan_tasks)
+    print(f"[ralph] Found orphan in-progress tasks: {task_ids}")
+    print("[ralph] Choose action: [r]eset tasks to failed and continue, [a]bort loop")
+
+    while True:
+        choice = input("[ralph] Action (r/a): ").strip().lower()
+        if choice in {"a", "abort"}:
+            print("[ralph] Loop aborted by user.")
+            return False
+        if choice in {"r", "reset"}:
+            for task in orphan_tasks:
+                recover_in_progress_task(progress, task.id, config.max_retries)
+            print(f"[ralph] Recovered orphan tasks: {task_ids}")
+            return True
+        print("[ralph] Invalid option. Enter 'r' to reset and continue, or 'a' to abort.")

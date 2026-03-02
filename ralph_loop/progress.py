@@ -131,8 +131,22 @@ def _set_phase_status_for_task(progress: Progress, task_id: str, status: PhaseSt
             return
 
 
+def _recalculate_phase_status(phase: PhaseProgress) -> None:
+    if all(task.status in {TaskStatus.COMPLETED, TaskStatus.ABORT} for task in phase.tasks):
+        phase.status = PhaseStatus.COMPLETED
+        return
+    if any(task.status in {TaskStatus.IN_PROGRESS, TaskStatus.FAILED} for task in phase.tasks):
+        phase.status = PhaseStatus.IN_PROGRESS
+        return
+    phase.status = PhaseStatus.NOT_STARTED
+
+
 def select_next_task(progress: Progress, max_retries: int = 3) -> TaskProgress | None:
-    """Select the next task honoring retry-first policy and current phase preference."""
+    """Select the next task honoring retry-first policy and current phase preference.
+
+    Tasks in ``IN_PROGRESS`` are intentionally excluded from selection. Callers should handle
+    orphaned in-progress tasks before requesting the next task.
+    """
     current_phase_id = progress.meta.current_phase
 
     def collect(predicate: Callable[[TaskProgress], bool]) -> list[TaskProgress]:
@@ -158,6 +172,39 @@ def select_next_task(progress: Progress, max_retries: int = 3) -> TaskProgress |
         return not_started[0]
 
     return None
+
+
+def find_in_progress_tasks(progress: Progress) -> list[TaskProgress]:
+    """Return all tasks currently locked in IN_PROGRESS."""
+    return [
+        task
+        for phase in progress.phases
+        for task in phase.tasks
+        if task.status == TaskStatus.IN_PROGRESS
+    ]
+
+
+def recover_in_progress_task(progress: Progress, task_id: str, max_retries: int = 3) -> None:
+    """Recover a task left in IN_PROGRESS after interruption.
+
+    Recovery transitions ``IN_PROGRESS`` tasks to ``FAILED`` (or ``ABORT`` if retries already
+    exhausted) while preserving retries and accumulated feedback.
+    """
+    task = find_task(progress, task_id)
+    if task.status != TaskStatus.IN_PROGRESS:
+        raise ValueError(
+            f"Illegal transition {task.status.value} -> failed/abort for task {task_id}"
+        )
+
+    if task.retries >= max_retries:
+        task.status = TaskStatus.ABORT
+    else:
+        task.status = TaskStatus.FAILED
+
+    for phase in progress.phases:
+        if any(member.id == task_id for member in phase.tasks):
+            _recalculate_phase_status(phase)
+            return
 
 
 def lock_task(progress: Progress, task_id: str) -> None:

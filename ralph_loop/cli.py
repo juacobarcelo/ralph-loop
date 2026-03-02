@@ -32,9 +32,11 @@ from ralph_loop.progress import (
     TaskStatus,
     complete_task,
     fail_task,
+    find_in_progress_tasks,
     find_task,
     load_progress,
     lock_task,
+    recover_in_progress_task,
     save_progress,
     select_next_task,
 )
@@ -1190,6 +1192,21 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
 
     if iteration is not None and iteration.get("current_step") == "update":
         _clear_iteration_state(paths.iteration_path)
+        iteration = None
+
+    if iteration is None:
+        in_progress_tasks = find_in_progress_tasks(progress)
+        if in_progress_tasks:
+            click.echo(
+                json.dumps(
+                    {
+                        "command": "orphan",
+                        "task_ids": [task.id for task in in_progress_tasks],
+                        "reason": "orphan_in_progress",
+                    }
+                )
+            )
+            return
 
     aborted_task = _first_aborted_task(progress)
     if aborted_task is not None:
@@ -1471,6 +1488,30 @@ def reset_command(task_id: str, config_path: str, loop_dir: str) -> None:
 
     save_progress(progress, config.progress_file)
     click.echo(f"Task reset: {task_id}")
+
+
+@main.command("recover")
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+@click.option("--loop-dir", default=".", show_default=True)
+@click.option("--task-id", default="all", show_default=True)
+def recover_command(config_path: str, loop_dir: str, task_id: str) -> None:
+    """Recover orphan tasks left in in_progress state."""
+    config, progress = _load_config_and_progress(config_path, loop_dir)
+
+    if task_id == "all":
+        task_ids = [task.id for task in find_in_progress_tasks(progress)]
+    else:
+        task_ids = [task_id]
+
+    recovered: list[str] = []
+    for pending_task_id in task_ids:
+        recover_in_progress_task(progress, pending_task_id, config.max_retries)
+        recovered.append(pending_task_id)
+
+    if recovered:
+        save_progress(progress, config.progress_file)
+
+    click.echo(json.dumps({"recovered": recovered}))
 
 
 @main.command("init")

@@ -159,3 +159,12 @@ All agent output must be in English: code, comments, variable names, docstrings,
 - Always run lint + type check + tests before committing.
 - When implementing a phase, create all files for that phase before moving to the next.
 - When a decision requires clarification, ask — do not guess.
+
+## Done Criteria (Code Tasks)
+
+- Any code-writing task is incomplete until quality gates pass, even if no PR is created.
+- Validate in `ralph-loop-dev` container (Python 3.12), not on host Python.
+- Required gates: `ruff check ralph_loop/ tests/`, `ruff format --check ralph_loop/ tests/`, `mypy ralph_loop/`, and `python -B -m pytest tests/ -v`.
+- If formatting fails, run `ruff format` on affected files and re-run checks.
+- Keep fixes minimal and targeted to the reported failure; avoid over-engineered or unrelated refactors.
+- Optional dependencies (e.g., `playwright`) must not break baseline typing or CI when optional extras are not installed.

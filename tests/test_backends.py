@@ -56,7 +56,13 @@ def test_sandbox_backend_builds_docker_command(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    result = backend.execute(prompt=str(prompt_file), timeout_seconds=123)
+    result = backend.execute(
+        prompt=str(prompt_file),
+        model="gpt-5",
+        timeout_seconds=123,
+        extra_flags=["--json"],
+        cwd=str(tmp_path),
+    )
 
     assert result.exit_code == 0
     assert result.timed_out is False
@@ -67,6 +73,12 @@ def test_sandbox_backend_builds_docker_command(monkeypatch, tmp_path) -> None:
     assert "OPENAI_API_KEY=secret" in captured["cmd"]
     assert f"{auth_dir}:{auth_dir}:ro" in captured["cmd"]
     assert "/workspace/prompt.md" in captured["cmd"]
+    assert "--model" in captured["cmd"]
+    assert "gpt-5" in captured["cmd"]
+    assert "--timeout-seconds" in captured["cmd"]
+    assert "123" in captured["cmd"]
+    assert "--extra-flag" in captured["cmd"]
+    assert "--json" in captured["cmd"]
 
 
 def test_sandbox_backend_writes_prompt_and_handles_timeout(monkeypatch, tmp_path) -> None:

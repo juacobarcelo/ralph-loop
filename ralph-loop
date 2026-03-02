@@ -51,6 +51,21 @@ run_trusted_verify_cmd() {
     bash -lc "$cmd"
 }
 
+build_backend_args() {
+    BACKEND_ARGS=()
+
+    local model timeout
+    model=$(jq -r '.model // empty' "$RALPH_TMP/next-action.json")
+    timeout=$(jq -r '.timeout_seconds // empty' "$RALPH_TMP/next-action.json")
+
+    [[ -n "$model" ]] && BACKEND_ARGS+=(--model "$model")
+    [[ -n "$timeout" ]] && BACKEND_ARGS+=(--timeout-seconds "$timeout")
+
+    while IFS= read -r extra_flag; do
+        [[ -n "$extra_flag" ]] && BACKEND_ARGS+=(--extra-flag "$extra_flag")
+    done < <(jq -r '.extra_flags[]? // empty' "$RALPH_TMP/next-action.json")
+}
+
 cmd_run() {
     ensure_image "base"
     for engine in $(run_base list-engines --config "/workspace/$CONFIG" 2>/dev/null); do
@@ -68,9 +83,12 @@ cmd_run() {
         case "$COMMAND" in
             code)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
+                build_backend_args
                 set +e
                 SECONDS=0
-                run_cli "$IMAGE" execute --prompt-file "/workspace/$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")"
+                run_cli "$IMAGE" execute \
+                    --prompt-file "/workspace/$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")" \
+                    "${BACKEND_ARGS[@]}"
                 EXIT_CODE=$?
                 DURATION=$SECONDS
                 set -e
@@ -90,11 +108,26 @@ cmd_run() {
                 ;;
             inspect)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
+                build_backend_args
                 set +e
-                STDOUT=$(run_cli "$IMAGE" inspect --prompt-file "/workspace/$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")")
+                STDOUT=$(run_cli "$IMAGE" inspect \
+                    --prompt-file "/workspace/$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")" \
+                    "${BACKEND_ARGS[@]}")
                 EXIT_CODE=$?
                 set -e
                 jq -n --arg task "$TASK_ID" --argjson exit "$EXIT_CODE" --arg out "$STDOUT" '{step:"inspect",task_id:$task,exit_code:$exit,stdout:$out}' > "$RALPH_TMP/step-result.json"
+                ;;
+            visual)
+                IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
+                build_backend_args
+                set +e
+                STDOUT=$(run_cli "$IMAGE" visual \
+                    --config "/workspace/$CONFIG" \
+                    --task-id "$TASK_ID" \
+                    "${BACKEND_ARGS[@]}")
+                EXIT_CODE=$?
+                set -e
+                jq -n --arg task "$TASK_ID" --argjson exit "$EXIT_CODE" --arg out "$STDOUT" '{step:"visual",task_id:$task,exit_code:$exit,stdout:$out}' > "$RALPH_TMP/step-result.json"
                 ;;
             update)
                 run_base update --config "/workspace/$CONFIG" --result-dir "/workspace/$RALPH_TMP/"

@@ -32,12 +32,10 @@ class SandboxBackend:
         extra_flags: list[str] | None = None,
         cwd: str | None = None,
     ) -> ExecutionResult:
-        del model
-        del extra_flags
-        del cwd
-
         prompt_file = self._prepare_prompt_file(prompt)
         image = f"ralph-loop-{self.inner.name}"
+        container_cwd = self._resolve_container_cwd(cwd)
+        effective_flags = extra_flags or []
 
         command = [
             "docker",
@@ -45,6 +43,8 @@ class SandboxBackend:
             "--rm",
             "-v",
             f"{self.workspace}:/workspace",
+            "-w",
+            container_cwd,
         ]
 
         for mount_path in self.auth.mount:
@@ -60,6 +60,11 @@ class SandboxBackend:
         relative_prompt = prompt_file.relative_to(self.workspace)
         container_prompt = Path("/workspace") / relative_prompt
         command.extend([image, "execute", "--prompt-file", str(container_prompt)])
+        if model:
+            command.extend(["--model", model])
+        command.extend(["--timeout-seconds", str(timeout_seconds)])
+        for flag in effective_flags:
+            command.extend(["--extra-flag", flag])
 
         start = time.monotonic()
         try:
@@ -68,7 +73,7 @@ class SandboxBackend:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=timeout_seconds,
+                timeout=timeout_seconds + 15,
             )
             duration = time.monotonic() - start
             return ExecutionResult(
@@ -108,10 +113,30 @@ class SandboxBackend:
     def _prepare_prompt_file(self, prompt: str) -> Path:
         candidate = Path(prompt)
         if candidate.exists():
-            return candidate.resolve()
+            resolved = candidate.resolve()
+            try:
+                resolved.relative_to(self.workspace)
+                return resolved
+            except ValueError:
+                return self._write_temp_prompt(resolved.read_text(encoding="utf-8"))
 
+        return self._write_temp_prompt(prompt)
+
+    def _write_temp_prompt(self, prompt: str) -> Path:
         tmp_dir = self.workspace / ".ralph-tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         file_path = tmp_dir / f"sandbox-prompt-{uuid.uuid4().hex}.md"
         file_path.write_text(prompt, encoding="utf-8")
         return file_path
+
+    def _resolve_container_cwd(self, cwd: str | None) -> str:
+        if cwd is None:
+            return "/workspace"
+
+        candidate = Path(cwd).expanduser().resolve()
+        try:
+            relative = candidate.relative_to(self.workspace)
+        except ValueError:
+            return "/workspace"
+
+        return str(Path("/workspace") / relative)

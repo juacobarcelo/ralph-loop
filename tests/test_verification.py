@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ralph_loop.config import RalphConfig
+from ralph_loop.config import RalphConfig, VisualVerifyConfig
 from ralph_loop.progress import TaskProgress
 from ralph_loop.task import Task
 from ralph_loop.verification.pipeline import run_verification_pipeline
+from ralph_loop.verification.visual import run_visual_verification
 
 
 class _FakeInspectorBackend:
@@ -159,3 +160,56 @@ demo
     ]
     assert inspection_sources
     assert inspection_sources[0].verdict == "fail"
+
+
+def test_visual_verification_uses_llm_verdict(monkeypatch, tmp_path) -> None:
+    task_file = tmp_path / "task.md"
+    task_file.write_text(
+        """---
+phase: 1
+verify_commands: []
+files_to_touch: []
+files_not_to_touch: []
+---
+
+# Task 01
+
+## Description
+
+demo
+""",
+        encoding="utf-8",
+    )
+    task = Task.load(str(task_file))
+
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(b"reference")
+    screenshot = tmp_path / ".ralph-tmp" / "visual" / "current.png"
+    screenshot.parent.mkdir(parents=True, exist_ok=True)
+    screenshot.write_bytes(b"current")
+
+    monkeypatch.setattr(
+        "ralph_loop.verification.visual._capture_screenshot",
+        lambda config, workspace: SimpleNamespace(path=screenshot, error=None),
+    )
+
+    backend = _FakeInspectorBackend('{"verdict":"pass","feedback":"visual matches"}')
+    result = run_visual_verification(
+        config=VisualVerifyConfig(
+            type="screenshot",
+            url="http://localhost:3000",
+            reference="reference.png",
+            assertion="Homepage layout matches",
+            viewport_width=1280,
+            viewport_height=720,
+        ),
+        workspace_dir=str(tmp_path),
+        backend=backend,
+        model="claude-opus",
+        timeout_seconds=60,
+        extra_flags=[],
+        task=task,
+    )
+
+    assert result.verdict == "pass"
+    assert "visual matches" in result.details

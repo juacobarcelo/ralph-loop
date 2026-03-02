@@ -32,6 +32,8 @@ from ralph_loop.progress import (
     save_progress,
     select_next_task,
 )
+from ralph_loop.task import Task
+from ralph_loop.verification.visual import run_visual_verification
 
 
 def _load_config(config_path: str) -> RalphConfig:
@@ -145,15 +147,15 @@ def _build_coder_prompt(task: Any) -> str:
     return body
 
 
-def _build_inspector_prompt(task: Any, verify_results: list[dict[str, Any]] | None) -> str:
+def _build_inspector_prompt(task: Any, verification_results: list[dict[str, Any]] | None) -> str:
     lines = [
         f"# Inspect Task {task.id}: {task.title}",
         "",
         "Review task result and return strict JSON:",
     ]
     lines.append('{"verdict":"pass|fail","feedback":"..."}')
-    if verify_results:
-        lines.extend(["", "## Verify results", json.dumps(verify_results, indent=2)])
+    if verification_results:
+        lines.extend(["", "## Verification results", json.dumps(verification_results, indent=2)])
     return "\n".join(lines) + "\n"
 
 
@@ -199,6 +201,21 @@ def _append_step_result(iteration: dict[str, Any], step_result: dict[str, Any]) 
     results.append(step_result)
 
 
+def _collect_verification_results(iteration: dict[str, Any]) -> list[dict[str, Any]]:
+    results = iteration.get("results")
+    if not isinstance(results, list):
+        return []
+    return [
+        item
+        for item in results
+        if isinstance(item, dict) and str(item.get("step", "")) in {"verify", "visual"}
+    ]
+
+
+def _visual_backend_role(config: RalphConfig) -> str:
+    return "visual" if "visual" in config.backends else "inspector"
+
+
 def _select_available_backend() -> tuple[str, Any]:
     for engine in ("codex", "copilot", "claude"):
         backend = get_backend(engine)
@@ -207,12 +224,25 @@ def _select_available_backend() -> tuple[str, Any]:
     raise click.ClickException("No supported AI CLI found in PATH (codex/copilot/claude)")
 
 
-def _run_prompt_with_available_backend(prompt_file: Path) -> int:
+def _run_prompt_with_available_backend(
+    prompt_file: Path,
+    *,
+    model: str | None = None,
+    timeout_seconds: int = 600,
+    extra_flags: list[str] | None = None,
+) -> int:
     if not prompt_file.exists():
         raise click.ClickException(f"Prompt file not found: {prompt_file}")
 
+    prompt_content = prompt_file.read_text(encoding="utf-8")
     _, backend = _select_available_backend()
-    result = backend.execute(prompt=str(prompt_file), cwd=str(prompt_file.parent))
+    result = backend.execute(
+        prompt=prompt_content,
+        model=model,
+        timeout_seconds=timeout_seconds,
+        extra_flags=extra_flags or [],
+        cwd=str(prompt_file.parent),
+    )
 
     if result.stdout:
         click.echo(result.stdout, nl=False)
@@ -696,6 +726,26 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
                 )
                 return
 
+            if task.visual_verify is not None:
+                visual_role = _visual_backend_role(config)
+                visual = config.get_backend(visual_role)
+                iteration["current_step"] = "visual"
+                _save_iteration_state(paths.iteration_path, iteration)
+                click.echo(
+                    json.dumps(
+                        {
+                            "command": "visual",
+                            "task_id": task.id,
+                            "image": f"ralph-loop-{visual.engine}",
+                            "model": visual.model,
+                            "timeout_seconds": visual.timeout_seconds,
+                            "extra_flags": visual.extra_flags,
+                            "auth": config.get_auth(visual.engine).model_dump(),
+                        }
+                    )
+                )
+                return
+
             inspector_prompt = _build_inspector_prompt(task, None)
             paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
             inspector = config.get_backend("inspector")
@@ -712,6 +762,7 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
                         ),
                         "model": inspector.model,
                         "timeout_seconds": inspector.timeout_seconds,
+                        "extra_flags": inspector.extra_flags,
                         "auth": config.get_auth(inspector.engine).model_dump(),
                     }
                 )
@@ -719,9 +770,28 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
             return
 
         if step_name == "verify":
-            results = step_result.get("results")
-            verify_results = results if isinstance(results, list) else None
-            inspector_prompt = _build_inspector_prompt(task, verify_results)
+            if task.visual_verify is not None:
+                visual_role = _visual_backend_role(config)
+                visual = config.get_backend(visual_role)
+                iteration["current_step"] = "visual"
+                _save_iteration_state(paths.iteration_path, iteration)
+                click.echo(
+                    json.dumps(
+                        {
+                            "command": "visual",
+                            "task_id": task.id,
+                            "image": f"ralph-loop-{visual.engine}",
+                            "model": visual.model,
+                            "timeout_seconds": visual.timeout_seconds,
+                            "extra_flags": visual.extra_flags,
+                            "auth": config.get_auth(visual.engine).model_dump(),
+                        }
+                    )
+                )
+                return
+
+            verification_results = _collect_verification_results(iteration)
+            inspector_prompt = _build_inspector_prompt(task, verification_results)
             paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
             inspector = config.get_backend("inspector")
             iteration["current_step"] = "inspect"
@@ -737,6 +807,32 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
                         ),
                         "model": inspector.model,
                         "timeout_seconds": inspector.timeout_seconds,
+                        "extra_flags": inspector.extra_flags,
+                        "auth": config.get_auth(inspector.engine).model_dump(),
+                    }
+                )
+            )
+            return
+
+        if step_name == "visual":
+            verification_results = _collect_verification_results(iteration)
+            inspector_prompt = _build_inspector_prompt(task, verification_results)
+            paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
+            inspector = config.get_backend("inspector")
+            iteration["current_step"] = "inspect"
+            _save_iteration_state(paths.iteration_path, iteration)
+            click.echo(
+                json.dumps(
+                    {
+                        "command": "inspect",
+                        "task_id": task.id,
+                        "image": f"ralph-loop-{inspector.engine}",
+                        "prompt_file": str(
+                            paths.inspector_prompt_path.relative_to(Path(config.workspace_dir))
+                        ),
+                        "model": inspector.model,
+                        "timeout_seconds": inspector.timeout_seconds,
+                        "extra_flags": inspector.extra_flags,
                         "auth": config.get_auth(inspector.engine).model_dump(),
                     }
                 )
@@ -782,6 +878,7 @@ def next_action_command(config_path: str, step_result_path: str | None) -> None:
                 "prompt_file": str(paths.coder_prompt_path.relative_to(Path(config.workspace_dir))),
                 "model": coder.model,
                 "timeout_seconds": coder.timeout_seconds,
+                "extra_flags": coder.extra_flags,
                 "auth": config.get_auth(coder.engine).model_dump(),
             }
         )
@@ -799,20 +896,73 @@ def run_command(config_path: str, sandbox: str) -> None:
 
 @main.command("execute")
 @click.option("--prompt-file", required=True)
-def execute_command(prompt_file: str) -> None:
+@click.option("--model", required=False)
+@click.option("--timeout-seconds", type=int, default=600, show_default=True)
+@click.option("--extra-flag", "extra_flags", multiple=True)
+def execute_command(
+    prompt_file: str, model: str | None, timeout_seconds: int, extra_flags: tuple[str, ...]
+) -> None:
     """Execute a coding prompt using an available AI CLI backend."""
-    exit_code = _run_prompt_with_available_backend(Path(prompt_file))
+    exit_code = _run_prompt_with_available_backend(
+        Path(prompt_file),
+        model=model,
+        timeout_seconds=timeout_seconds,
+        extra_flags=list(extra_flags),
+    )
     if exit_code != 0:
         raise SystemExit(exit_code)
 
 
 @main.command("inspect")
 @click.option("--prompt-file", required=True)
-def inspect_command(prompt_file: str) -> None:
+@click.option("--model", required=False)
+@click.option("--timeout-seconds", type=int, default=600, show_default=True)
+@click.option("--extra-flag", "extra_flags", multiple=True)
+def inspect_command(
+    prompt_file: str, model: str | None, timeout_seconds: int, extra_flags: tuple[str, ...]
+) -> None:
     """Execute an inspection prompt using an available AI CLI backend."""
-    exit_code = _run_prompt_with_available_backend(Path(prompt_file))
+    exit_code = _run_prompt_with_available_backend(
+        Path(prompt_file),
+        model=model,
+        timeout_seconds=timeout_seconds,
+        extra_flags=list(extra_flags),
+    )
     if exit_code != 0:
         raise SystemExit(exit_code)
+
+
+@main.command("visual")
+@click.option("--config", "config_path", required=True)
+@click.option("--task-id", required=True)
+@click.option("--model", required=False)
+@click.option("--timeout-seconds", type=int, default=300, show_default=True)
+@click.option("--extra-flag", "extra_flags", multiple=True)
+def visual_command(
+    config_path: str,
+    task_id: str,
+    model: str | None,
+    timeout_seconds: int,
+    extra_flags: tuple[str, ...],
+) -> None:
+    """Run visual verification and print JSON verdict."""
+    config = _load_config(config_path)
+    progress = load_progress(config.progress_file)
+    task_progress = find_task(progress, task_id)
+    task = Task.load(task_progress.task_file)
+
+    _, backend = _select_available_backend()
+    visual_config = task_progress.visual_verify or task.frontmatter.visual_verify
+    result = run_visual_verification(
+        config=visual_config,
+        workspace_dir=config.workspace_dir,
+        backend=backend,
+        model=model,
+        timeout_seconds=timeout_seconds,
+        extra_flags=list(extra_flags),
+        task=task,
+    )
+    click.echo(json.dumps({"verdict": result.verdict, "feedback": result.details}))
 
 
 @main.command("update")
@@ -875,6 +1025,20 @@ def update_command(config_path: str, result_dir: str) -> None:
                             output=combined,
                         )
                     )
+            continue
+
+        if step_name == "visual":
+            verdict, feedback = _parse_inspector_output(str(item.get("stdout", "")))
+            step_exit_code = int(item.get("exit_code", 0))
+            if step_exit_code != 0:
+                verdict = "fail"
+                feedback = (
+                    feedback
+                    or f"Visual step command failed with exit code {step_exit_code}"
+                )
+            if verdict != "pass":
+                all_passed = False
+            feedback_sources.append(FeedbackSource(type="visual", verdict=verdict, details=feedback))
             continue
 
         if step_name == "inspect":

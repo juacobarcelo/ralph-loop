@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ralph_loop.backends.base import Backend
-from ralph_loop.config import RalphConfig
+from ralph_loop.config import BackendConfig, RalphConfig
 from ralph_loop.progress import FeedbackSource, TaskProgress
 from ralph_loop.task import Task
 from ralph_loop.verification.ai_inspection import run_ai_inspection
@@ -26,6 +26,8 @@ def run_verification_pipeline(
     config: RalphConfig,
     inspector_backend: Backend,
     verify_commands: list[str],
+    visual_backend: Backend | None = None,
+    visual_backend_config: BackendConfig | None = None,
 ) -> VerificationReport:
     """Run all verifiers and aggregate pass/fail state and feedback sources."""
     feedback_sources: list[FeedbackSource] = []
@@ -47,7 +49,23 @@ def run_verification_pipeline(
             )
         )
 
-    visual_result = run_visual_verification(task.frontmatter.visual_verify, config.workspace_dir)
+    effective_visual_backend = visual_backend or inspector_backend
+    if visual_backend_config is not None:
+        effective_visual_config = visual_backend_config
+    elif "visual" in config.backends:
+        effective_visual_config = config.get_backend("visual")
+    else:
+        effective_visual_config = config.get_backend("inspector")
+
+    visual_result = run_visual_verification(
+        config=task_progress.visual_verify or task.frontmatter.visual_verify,
+        workspace_dir=config.workspace_dir,
+        backend=effective_visual_backend,
+        model=effective_visual_config.model,
+        timeout_seconds=effective_visual_config.timeout_seconds,
+        extra_flags=effective_visual_config.extra_flags,
+        task=task,
+    )
     if visual_result.verdict != "pass":
         all_passed = False
     feedback_sources.append(

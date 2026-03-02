@@ -7,8 +7,8 @@ from click.testing import CliRunner
 import yaml
 
 from ralph_loop.cli import main
-from ralph_loop.config import RalphConfig
-from ralph_loop.progress import load_progress, save_progress
+from ralph_loop.config import RalphConfig, VisualVerifyConfig
+from ralph_loop.progress import TaskStatus, load_progress, save_progress
 
 
 def test_status_command(sample_workspace: Path) -> None:
@@ -252,6 +252,7 @@ def test_next_action_and_update_flow(sample_workspace: Path, monkeypatch) -> Non
 def test_execute_command_uses_available_backend(tmp_path: Path, monkeypatch) -> None:
     prompt_path = tmp_path / "coder-prompt.md"
     prompt_path.write_text("implement", encoding="utf-8")
+    captured: dict[str, object] = {}
 
     class _Backend:
         def __init__(self, engine: str) -> None:
@@ -268,7 +269,11 @@ def test_execute_command_uses_available_backend(tmp_path: Path, monkeypatch) -> 
             extra_flags: list[str] | None = None,
             cwd: str | None = None,
         ):
-            _ = model, timeout_seconds, extra_flags, cwd
+            captured["prompt"] = prompt
+            captured["model"] = model
+            captured["timeout_seconds"] = timeout_seconds
+            captured["extra_flags"] = extra_flags
+            captured["cwd"] = cwd
 
             class _Result:
                 exit_code = 0
@@ -280,9 +285,27 @@ def test_execute_command_uses_available_backend(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _Backend(engine))
 
     runner = CliRunner()
-    result = runner.invoke(main, ["execute", "--prompt-file", str(prompt_path)])
+    result = runner.invoke(
+        main,
+        [
+            "execute",
+            "--prompt-file",
+            str(prompt_path),
+            "--model",
+            "gpt-x",
+            "--timeout-seconds",
+            "42",
+            "--extra-flag",
+            "flag-1",
+        ],
+    )
     assert result.exit_code == 0
-    assert f"ran:{prompt_path}" in result.output
+    assert "ran:implement" in result.output
+    assert captured["prompt"] == "implement"
+    assert captured["model"] == "gpt-x"
+    assert captured["timeout_seconds"] == 42
+    assert captured["extra_flags"] == ["flag-1"]
+    assert captured["cwd"] == str(prompt_path.parent)
 
 
 def test_inspect_command_propagates_backend_exit_code(tmp_path: Path, monkeypatch) -> None:
@@ -318,6 +341,134 @@ def test_inspect_command_propagates_backend_exit_code(tmp_path: Path, monkeypatc
     runner = CliRunner()
     result = runner.invoke(main, ["inspect", "--prompt-file", str(prompt_path)])
     assert result.exit_code == 7
+
+
+def test_next_action_includes_visual_step(sample_workspace: Path, monkeypatch) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    progress_path = sample_workspace / "PROGRESS.yaml"
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+
+    progress = load_progress(str(progress_path))
+    progress.phases[0].tasks[0].verify_commands = []
+    progress.phases[0].tasks[0].visual_verify = VisualVerifyConfig.model_validate(
+        {
+            "type": "screenshot",
+            "url": "http://localhost:3000",
+            "reference": "references/home.png",
+            "assertion": "Layout should match",
+            "viewport_width": 1280,
+            "viewport_height": 720,
+        }
+    )
+    save_progress(progress, str(progress_path))
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    runner = CliRunner()
+    first = runner.invoke(main, ["next-action", "--config", str(config_path)])
+    assert first.exit_code == 0
+    assert json.loads(first.output)["command"] == "code"
+
+    step_result = tmp_dir / "step-result.json"
+    step_result.write_text(
+        json.dumps({"step": "code", "task_id": "01", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    second = runner.invoke(
+        main,
+        [
+            "next-action",
+            "--config",
+            str(config_path),
+            "--step-result",
+            str(step_result),
+        ],
+    )
+    assert second.exit_code == 0
+    second_payload = json.loads(second.output)
+    assert second_payload["command"] == "visual"
+    assert "image" in second_payload
+
+    step_result.write_text(
+        json.dumps(
+            {
+                "step": "visual",
+                "task_id": "01",
+                "exit_code": 0,
+                "stdout": json.dumps({"verdict": "pass", "feedback": "ok"}),
+            }
+        ),
+        encoding="utf-8",
+    )
+    third = runner.invoke(
+        main,
+        [
+            "next-action",
+            "--config",
+            str(config_path),
+            "--step-result",
+            str(step_result),
+        ],
+    )
+    assert third.exit_code == 0
+    assert json.loads(third.output)["command"] == "inspect"
+
+
+def test_update_command_fails_task_when_visual_step_fails(sample_workspace: Path) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config = RalphConfig.load(str(config_path))
+    paths = sample_workspace / ".ralph-tmp"
+    paths.mkdir(exist_ok=True)
+    progress = load_progress(config.progress_file)
+    progress.phases[0].tasks[0].status = TaskStatus.IN_PROGRESS
+    save_progress(progress, config.progress_file)
+
+    iteration = {
+        "task_id": "01",
+        "current_step": "update",
+        "started_at": "2026-03-01T00:00:00Z",
+        "results": [
+            {"step": "code", "task_id": "01", "exit_code": 0},
+            {
+                "step": "visual",
+                "task_id": "01",
+                "exit_code": 0,
+                "stdout": json.dumps({"verdict": "fail", "feedback": "mismatch"}),
+            },
+            {
+                "step": "inspect",
+                "task_id": "01",
+                "exit_code": 0,
+                "stdout": json.dumps({"verdict": "pass", "feedback": "ok"}),
+            },
+        ],
+    }
+    (sample_workspace / ".ralph-tmp" / "iteration-state.json").write_text(
+        json.dumps(iteration),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["update", "--config", str(config_path), "--result-dir", str(paths)],
+    )
+    assert result.exit_code == 0
+
+    progress = load_progress(config.progress_file)
+    task = progress.phases[0].tasks[0]
+    assert task.status.value == "failed"
+    assert task.feedback
+    assert any(source.type == "visual" for source in task.feedback[-1].sources)
 
 
 def test_run_command_delegates_to_loop(sample_workspace: Path, monkeypatch) -> None:

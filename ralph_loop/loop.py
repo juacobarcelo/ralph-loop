@@ -68,6 +68,9 @@ def run_loop(config: RalphConfig, sandbox: str = "none") -> int:
 
         inspector_cfg = config.get_backend("inspector")
         inspector_backend = _make_backend(inspector_cfg, config, sandbox)
+        visual_role = "visual" if "visual" in config.backends else "inspector"
+        visual_cfg = config.get_backend(visual_role)
+        visual_backend = _make_backend(visual_cfg, config, sandbox)
         verify_commands = task.get_verify_commands(config.verify_commands)
         report = run_verification_pipeline(
             task=task,
@@ -75,6 +78,8 @@ def run_loop(config: RalphConfig, sandbox: str = "none") -> int:
             config=config,
             inspector_backend=inspector_backend,
             verify_commands=verify_commands,
+            visual_backend=visual_backend,
+            visual_backend_config=visual_cfg,
         )
 
         if code_result.exit_code != 0:

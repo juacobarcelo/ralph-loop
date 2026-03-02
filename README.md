@@ -143,6 +143,23 @@ Write a markdown file describing what you want to build:
 ./ralph-loop init --from plan.md
 ```
 
+You can steer task generation with additional directives:
+
+```bash
+./ralph-loop init \
+  --from plan.md \
+  --instructions "Review only at the end visually that all buttons are visible and legible"
+```
+
+Or provide a directives file:
+
+```bash
+./ralph-loop init --from plan.md --instructions-file generation-directives.md
+```
+
+Both flags are composable. When both are present, `--instructions-file` content is appended first,
+then `--instructions`.
+
 This creates a dedicated loop directory next to the plan:
 
 - `.ralph-loop/<plan-slug>/tasks/`
@@ -150,6 +167,35 @@ This creates a dedicated loop directory next to the plan:
 - `.ralph-loop/<plan-slug>/product/`
 
 It uses an AI backend to decompose your plan into structured, actionable tasks — or falls back to a deterministic parser if no backend is available.
+
+### How to influence `init` generation (LLM steering contract)
+
+`init` builds a single plan-to-tasks prompt from three sources (lowest to highest priority):
+
+1. `project_instructions` (auto-discovered `AGENTS.md` / `CLAUDE.md` / `COPILOT.md`, or explicit config)
+2. Source plan (`--from`)
+3. User directives (`--instructions-file`, then `--instructions`)
+
+Use directives to control generated task metadata, not only prose. The generator should emit tasks with
+frontmatter-compatible fields that drive the loop:
+
+- `acceptance_criteria`: concrete, testable checks.
+- `verify_commands`: deterministic commands executed in the generated `product/` workspace.
+- `visual_verify`: screenshot verification contract (`url`, `reference`, `assertion`, viewport).
+- `files_to_touch` / `files_not_to_touch`: implementation boundaries.
+- `constraints`: hard limits or guardrails for coding.
+
+Directive examples that reliably shape output:
+
+- `Review visually that the video list loads correctly.`
+  - Expected effect: attach `visual_verify` to the task that implements/renders the video list.
+- `Review only at the end visually that all buttons are displayed and legible.`
+  - Expected effect: attach `visual_verify` only to the final relevant task.
+- `Use verify_commands: python -m pytest -q tests and ruff check src`.
+  - Expected effect: include deterministic checks in generated tasks.
+
+Tip for best results: keep plans focused on deliverables, and place strict behavioral constraints in
+directives so they override inferred defaults.
 
 ### 3. Configure backends
 

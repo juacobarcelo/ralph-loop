@@ -494,6 +494,19 @@ def _fallback_plan(source_text: str, title_hint: str) -> GeneratedPlan:
     return _apply_plan_hints(plan, source_text)
 
 
+def _contains_visual_instruction(text: str) -> bool:
+    lowered = text.lower()
+    markers = (
+        "visual verification",
+        "visual_verify",
+        "visual check",
+        "visually",
+        "visualmente",
+        "revisar visual",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def _extract_verify_command_hint(source_text: str) -> str | None:
     patterns = [
         r"`(python\s+-m\s+pytest[^`]+)`",
@@ -509,12 +522,20 @@ def _extract_verify_command_hint(source_text: str) -> str | None:
 
 def _extract_visual_verify_hint(source_text: str) -> VisualVerifyConfig | None:
     lowered = source_text.lower()
-    if "visual verification" not in lowered and "visual_verify" not in lowered:
+    if not _contains_visual_instruction(source_text):
         return None
 
-    reference_match = re.search(r"Reference image path:\s*`([^`]+)`", source_text)
-    assertion_match = re.search(r"Assertion:\s*(.+)", source_text)
-    url_match = re.search(r"URL:\s*`([^`]+)`", source_text)
+    reference_match = re.search(
+        r"(?:Reference image path|Imagen de referencia):\s*`([^`]+)`",
+        source_text,
+        flags=re.IGNORECASE,
+    )
+    assertion_match = re.search(
+        r"(?:Assertion|Aserción):\s*(.+)",
+        source_text,
+        flags=re.IGNORECASE,
+    )
+    url_match = re.search(r"URL:\s*`([^`]+)`", source_text, flags=re.IGNORECASE)
 
     if url_match:
         url = url_match.group(1).strip()
@@ -548,13 +569,38 @@ def _apply_plan_hints(plan: GeneratedPlan, source_text: str) -> GeneratedPlan:
     verify_hint = _extract_verify_command_hint(source_text)
     visual_hint = _extract_visual_verify_hint(source_text)
 
+    directive_text = source_text.lower()
+    visual_only_at_end = _is_final_only_visual_directive(directive_text)
+    visual_focus_terms = _extract_visual_focus_terms(directive_text)
+
     has_visual = False
+    flat_tasks: list[GeneratedTask] = []
     for phase in plan.phases:
         for task in phase.tasks:
+            flat_tasks.append(task)
             if verify_hint and not task.verify_commands:
                 task.verify_commands = [verify_hint]
             if task.visual_verify is not None:
                 has_visual = True
+
+    if visual_hint is not None and flat_tasks:
+        if visual_only_at_end:
+            target = _select_visual_target(flat_tasks, visual_focus_terms, prefer_last=True)
+            if target is None:
+                target = flat_tasks[-1]
+            for task in flat_tasks:
+                task.visual_verify = None
+            target.visual_verify = visual_hint
+            return plan
+
+        if visual_focus_terms:
+            target = _select_visual_target(flat_tasks, visual_focus_terms, prefer_last=False)
+            if target is not None:
+                for task in flat_tasks:
+                    if task is not target:
+                        task.visual_verify = None
+                target.visual_verify = visual_hint
+                return plan
 
     if visual_hint is not None and not has_visual:
         keywords = ("visual", "ui", "web", "index.html", "homepage", "page")
@@ -573,7 +619,90 @@ def _apply_plan_hints(plan: GeneratedPlan, source_text: str) -> GeneratedPlan:
     return plan
 
 
-def _build_prompt(source_content: str, config: RalphConfig) -> str:
+def _is_final_only_visual_directive(text: str) -> bool:
+    patterns = (
+        r"solo\s+al\s+final[^\n]*visual",
+        r"only\s+at\s+the\s+end[^\n]*visual",
+        r"visual[^\n]*only\s+at\s+the\s+end",
+        r"only\s+final[^\n]*visual",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _extract_visual_focus_terms(text: str) -> list[str]:
+    patterns = (
+        r"(?:revisar|verificar|validar)\s+visualmente\s+que\s+([^\n\.;]+)",
+        r"(?:visually\s+(?:review|verify|check))(?:\s+that)?\s+([^\n\.;]+)",
+    )
+
+    phrase: str | None = None
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            phrase = match.group(1).strip()
+            break
+
+    if phrase is None:
+        return []
+
+    stop_words = {
+        "que",
+        "the",
+        "and",
+        "con",
+        "los",
+        "las",
+        "para",
+        "from",
+        "with",
+        "all",
+        "todos",
+        "todas",
+    }
+    terms: list[str] = []
+    for token in re.split(r"\W+", phrase):
+        normalized = token.strip().lower()
+        if len(normalized) < 3 or normalized in stop_words:
+            continue
+        if normalized not in terms:
+            terms.append(normalized)
+    return terms
+
+
+def _select_visual_target(
+    tasks: list[GeneratedTask],
+    focus_terms: list[str],
+    *,
+    prefer_last: bool,
+) -> GeneratedTask | None:
+    if not tasks:
+        return None
+
+    if focus_terms:
+        scored_matches: list[tuple[int, GeneratedTask]] = []
+        for task in tasks:
+            haystack = f"{task.title} {task.description}".lower()
+            score = sum(1 for term in focus_terms if term in haystack)
+            if score > 0:
+                scored_matches.append((score, task))
+        if scored_matches:
+            max_score = max(score for score, _task in scored_matches)
+            best_tasks = [task for score, task in scored_matches if score == max_score]
+            return best_tasks[-1] if prefer_last else best_tasks[0]
+
+    keywords = ("visual", "ui", "web", "index.html", "homepage", "page")
+    keyword_matches = [
+        task
+        for task in tasks
+        if any(keyword in f"{task.title} {task.description}".lower() for keyword in keywords)
+    ]
+    if keyword_matches:
+        return keyword_matches[-1] if prefer_last else keyword_matches[0]
+
+    return tasks[-1] if prefer_last else tasks[0]
+
+
+def _build_prompt(source_content: str, config: RalphConfig, user_directives: str = "") -> str:
     project_instructions = ""
     if config.project_instructions:
         instructions_path = Path(config.project_instructions)
@@ -581,7 +710,27 @@ def _build_prompt(source_content: str, config: RalphConfig) -> str:
             project_instructions = instructions_path.read_text(encoding="utf-8")
 
     template = _load_plan_template()
-    return template.render(source_content=source_content, project_instructions=project_instructions)
+    return template.render(
+        source_content=source_content,
+        project_instructions=project_instructions,
+        user_directives=user_directives,
+    )
+
+
+def _load_user_directives(instructions: str | None, instructions_file: Path | None) -> str:
+    chunks: list[str] = []
+
+    if instructions_file is not None:
+        file_content = instructions_file.read_text(encoding="utf-8").strip()
+        if file_content:
+            chunks.append(file_content)
+
+    if instructions:
+        inline_content = instructions.strip()
+        if inline_content:
+            chunks.append(inline_content)
+
+    return "\n\n".join(chunks)
 
 
 def _ensure_init_directories(config: RalphConfig) -> None:
@@ -1303,9 +1452,23 @@ def reset_command(task_id: str, config_path: str, loop_dir: str) -> None:
 @click.option("--from", "source_path", required=True)
 @click.option("--backend", required=False)
 @click.option("--model", required=False)
+@click.option(
+    "--instructions", required=False, help="Additional user directives for plan generation."
+)
+@click.option(
+    "--instructions-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=False,
+    help="Path to a file containing additional directives.",
+)
 @click.option("--config", "config_path", default=_default_config_path, show_default="auto")
 def init_command(
-    source_path: str, backend: str | None, model: str | None, config_path: str
+    source_path: str,
+    backend: str | None,
+    model: str | None,
+    instructions: str | None,
+    instructions_file: Path | None,
+    config_path: str,
 ) -> None:
     """Generate tasks and progress from a plan document."""
     source = Path(source_path)
@@ -1322,7 +1485,10 @@ def init_command(
 
     click.echo(f"[init] Reading source design: {source}")
     source_content = source.read_text(encoding="utf-8")
-    prompt = _build_prompt(source_content, config)
+    user_directives = _load_user_directives(instructions, instructions_file)
+    if user_directives:
+        click.echo("[init] Applying additional user directives.")
+    prompt = _build_prompt(source_content, config, user_directives)
 
     role_backend = (
         config.get_backend("inspector")
@@ -1347,9 +1513,13 @@ def init_command(
     if generated_plan is None:
         click.echo("[init] AI generation unavailable/invalid. Using deterministic fallback parser.")
         generated_plan = _fallback_plan(source_content, source.stem.replace("-", " ").title())
+        if user_directives:
+            generated_plan = _apply_plan_hints(
+                generated_plan, f"{source_content}\n\n{user_directives}"
+            )
     else:
         click.echo("[init] AI generation completed.")
-        generated_plan = _apply_plan_hints(generated_plan, source_content)
+        generated_plan = _apply_plan_hints(generated_plan, f"{source_content}\n\n{user_directives}")
 
     click.echo("[init] Writing tasks and progress files...")
     count, task_dir, progress_path = _write_generated_artifacts(context, generated_plan)

@@ -1511,15 +1511,13 @@ def init_command(
         model_override=model,
     )
     if generated_plan is None:
-        click.echo("[init] AI generation unavailable/invalid. Using deterministic fallback parser.")
-        generated_plan = _fallback_plan(source_content, source.stem.replace("-", " ").title())
-        if user_directives:
-            generated_plan = _apply_plan_hints(
-                generated_plan, f"{source_content}\n\n{user_directives}"
-            )
-    else:
-        click.echo("[init] AI generation completed.")
-        generated_plan = _apply_plan_hints(generated_plan, f"{source_content}\n\n{user_directives}")
+        raise click.ClickException(
+            "AI generation unavailable or invalid backend output. "
+            "`init` requires AI generation and does not support deterministic fallback."
+        )
+
+    click.echo("[init] AI generation completed.")
+    generated_plan = _apply_plan_hints(generated_plan, f"{source_content}\n\n{user_directives}")
 
     click.echo("[init] Writing tasks and progress files...")
     count, task_dir, progress_path = _write_generated_artifacts(context, generated_plan)

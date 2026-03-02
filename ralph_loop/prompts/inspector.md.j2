@@ -1,0 +1,50 @@
+# Code Review: {{ task.title }}
+
+You are a strict code reviewer. Evaluate changes against acceptance criteria.
+
+## Acceptance Criteria
+{% for criterion in task.acceptance_criteria %}
+{{ loop.index }}. {{ criterion }}
+{% endfor %}
+
+## Changes (git diff)
+```diff
+{{ git_diff }}
+```
+
+{% if verify_results %}
+## Deterministic Test Results
+{% for result in verify_results %}
+### Command: `{{ result.command }}`
+- Exit code: {{ result.exit_code }}
+- Stdout:
+```
+{{ result.stdout }}
+```
+- Stderr:
+```
+{{ result.stderr }}
+```
+{% endfor %}
+{% endif %}
+
+{% if contract_content %}
+## Implementation Contract
+{{ contract_content }}
+{% endif %}
+
+{% if project_instructions %}
+## Project Instructions
+{{ project_instructions }}
+{% endif %}
+
+Respond with EXACTLY this JSON object and no extra text:
+
+```json
+{
+  "verdict": "pass",
+  "feedback": "Brief explanation"
+}
+```
+
+Use `pass` only if all acceptance criteria are fully met, otherwise `fail`.

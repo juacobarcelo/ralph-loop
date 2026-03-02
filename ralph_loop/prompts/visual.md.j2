@@ -1,0 +1,38 @@
+# Visual Review: {{ task.title }}
+
+{% if reference_path %}
+You are validating UI correctness using two images:
+- Reference image path: `{{ reference_path }}`
+- Current screenshot path: `{{ screenshot_path }}`
+{% else %}
+You are validating UI correctness using the current screenshot only:
+- Current screenshot path: `{{ screenshot_path }}`
+{% endif %}
+
+Workspace root: `{{ workspace_dir }}`
+Target URL: `{{ visual_config.url }}`
+Viewport: {{ visual_config.viewport_width }}x{{ visual_config.viewport_height }}
+
+Task assertion:
+{{ visual_config.assertion }}
+
+Task acceptance criteria:
+{% for criterion in task.acceptance_criteria %}
+{{ loop.index }}. {{ criterion }}
+{% endfor %}
+
+{% if reference_path %}
+Review both images and decide if the current screenshot satisfies the assertion.
+{% else %}
+Review the screenshot and decide if it satisfies the assertion.
+{% endif %}
+Respond with EXACTLY this JSON object and no extra text:
+
+```json
+{
+  "verdict": "pass",
+  "feedback": "Brief explanation"
+}
+```
+
+Use `pass` only if the screenshot satisfies the assertion. Otherwise return `fail`.

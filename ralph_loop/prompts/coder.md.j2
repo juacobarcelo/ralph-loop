@@ -1,0 +1,53 @@
+# Task: {{ task.title }}
+
+## Description
+{{ task.description }}
+
+## Acceptance Criteria
+{% for criterion in task.acceptance_criteria %}
+{{ loop.index }}. {{ criterion }}
+{% endfor %}
+
+## Files to Create/Modify
+{% for file_path in task.frontmatter.files_to_touch %}
+- `{{ file_path }}`
+{% endfor %}
+
+## Test Plan
+{{ task.test_plan }}
+
+{% if task.reference_impl %}
+## Reference Implementation
+{{ task.reference_impl }}
+{% endif %}
+
+## Constraints
+{% for constraint in task.constraints %}
+- {{ constraint }}
+{% endfor %}
+{% for file_path in task.frontmatter.files_not_to_touch %}
+- Do NOT modify `{{ file_path }}`
+{% endfor %}
+
+{% if contract_content %}
+## Implementation Contract
+{{ contract_content }}
+{% endif %}
+
+{% if project_instructions %}
+## Project Instructions
+{{ project_instructions }}
+{% endif %}
+
+{% if is_retry %}
+## ⚠️ RETRY — Attempt {{ attempt_number }} of {{ max_retries }}
+
+This task failed on previous attempts. Fix all issues from previous feedback before declaring done.
+
+{{ previous_feedback }}
+{% endif %}
+
+## Instructions
+1. Implement the task end-to-end, including tests.
+2. Run verification commands before declaring done.
+3. Keep changes scoped to this task.

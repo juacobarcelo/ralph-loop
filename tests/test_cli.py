@@ -113,8 +113,8 @@ def test_init_command_generates_files_with_backend_output(
     assert generated_task.exists()
     generated_task_content = generated_task.read_text(encoding="utf-8")
     assert "verify_commands:" in generated_task_content
-    assert 'visual_verify:' in generated_task_content
-    assert 'reference: references/home.jpg' in generated_task_content
+    assert "visual_verify:" in generated_task_content
+    assert "reference: references/home.jpg" in generated_task_content
 
     progress_path = sample_workspace / "PROGRESS.yaml"
     payload = yaml.safe_load(progress_path.read_text(encoding="utf-8"))
@@ -153,9 +153,7 @@ def test_init_command_falls_back_when_backend_unavailable(
     assert (sample_workspace / "tasks" / "02-second-task.md").exists()
 
 
-def test_init_fallback_applies_verify_and_visual_hints(
-    sample_workspace: Path, monkeypatch
-) -> None:
+def test_init_fallback_applies_verify_and_visual_hints(sample_workspace: Path, monkeypatch) -> None:
     class _UnavailableBackend:
         def is_available(self) -> bool:
             return False
@@ -196,11 +194,15 @@ Verification:
 
     progress = yaml.safe_load((sample_workspace / "PROGRESS.yaml").read_text(encoding="utf-8"))
     tasks = progress["phases"][0]["tasks"]
-    assert all(task["verify_commands"] == ["python -m pytest -q ./tmp/product/tests"] for task in tasks)
+    assert all(
+        task["verify_commands"] == ["python -m pytest -q ./tmp/product/tests"] for task in tasks
+    )
     assert any(task["visual_verify"] is not None for task in tasks)
 
 
-def test_init_fallback_applies_visual_hint_without_reference(sample_workspace: Path, monkeypatch) -> None:
+def test_init_fallback_applies_visual_hint_without_reference(
+    sample_workspace: Path, monkeypatch
+) -> None:
     class _UnavailableBackend:
         def is_available(self) -> bool:
             return False
@@ -249,7 +251,9 @@ def test_init_creates_target_directories_when_missing(sample_workspace: Path, mo
     progress_file = sample_workspace / "generated" / "state" / "PROGRESS.yaml"
     pause_file = sample_workspace / "generated" / "state" / "PAUSE.md"
 
-    config_payload = yaml.safe_load((sample_workspace / "ralph-config.yaml").read_text(encoding="utf-8"))
+    config_payload = yaml.safe_load(
+        (sample_workspace / "ralph-config.yaml").read_text(encoding="utf-8")
+    )
     config_payload["workspace_dir"] = str(workspace_dir)
     config_payload["task_dir"] = str(task_dir)
     config_payload["progress_file"] = str(progress_file)
@@ -456,7 +460,9 @@ def test_execute_command_uses_available_backend(tmp_path: Path, monkeypatch) -> 
     assert captured["cwd"] == str(prompt_path.parent)
 
 
-def test_execute_command_uses_workspace_cwd_for_ralph_tmp_prompt(tmp_path: Path, monkeypatch) -> None:
+def test_execute_command_uses_workspace_cwd_for_ralph_tmp_prompt(
+    tmp_path: Path, monkeypatch
+) -> None:
     prompt_dir = tmp_path / ".ralph-tmp"
     prompt_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = prompt_dir / "coder-prompt.md"
@@ -648,7 +654,9 @@ def test_next_action_includes_visual_step(sample_workspace: Path, monkeypatch) -
     assert json.loads(third.output)["command"] == "inspect"
 
 
-def test_next_action_returns_abort_when_any_task_is_aborted(sample_workspace: Path, monkeypatch) -> None:
+def test_next_action_returns_abort_when_any_task_is_aborted(
+    sample_workspace: Path, monkeypatch
+) -> None:
     config_path = sample_workspace / "ralph-config.yaml"
     progress_path = sample_workspace / "PROGRESS.yaml"
 

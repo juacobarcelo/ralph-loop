@@ -42,7 +42,9 @@ def run_visual_verification(
 ) -> VisualVerificationResult:
     """Run visual verification through screenshot capture and LLM review."""
     if config is None:
-        return VisualVerificationResult(verdict="pass", details="visual verification not configured")
+        return VisualVerificationResult(
+            verdict="pass", details="visual verification not configured"
+        )
 
     workspace = Path(workspace_dir).resolve()
     reference_path: Path | None = None

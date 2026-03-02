@@ -636,7 +636,9 @@ def _format_task_markdown(phase_id: int, task: GeneratedTask) -> str:
         )
         or "1. Complete the requested implementation."
     )
-    files_to_touch = "\n".join([f"- {file_path}" for file_path in task.files_to_touch]) or "- (to define)"
+    files_to_touch = (
+        "\n".join([f"- {file_path}" for file_path in task.files_to_touch]) or "- (to define)"
+    )
     test_plan = task.test_plan or "1. Run the configured verification commands."
     constraints = "\n".join([f"- {constraint}" for constraint in task.constraints]) or "- None"
     frontmatter_payload: dict[str, object] = {
@@ -815,7 +817,9 @@ def validate_command(config_path: str) -> None:
             f"Task files referenced in progress are missing: {missing_in_progress}"
         )
 
-    not_referenced = [path for path in sorted(task_files_on_disk) if path not in progress_task_files]
+    not_referenced = [
+        path for path in sorted(task_files_on_disk) if path not in progress_task_files
+    ]
     if not_referenced:
         raise click.ClickException(f"Task files not referenced in progress: {not_referenced}")
 
@@ -1198,13 +1202,12 @@ def update_command(config_path: str, result_dir: str) -> None:
             step_exit_code = int(item.get("exit_code", 0))
             if step_exit_code != 0:
                 verdict = "fail"
-                feedback = (
-                    feedback
-                    or f"Visual step command failed with exit code {step_exit_code}"
-                )
+                feedback = feedback or f"Visual step command failed with exit code {step_exit_code}"
             if verdict != "pass":
                 all_passed = False
-            feedback_sources.append(FeedbackSource(type="visual", verdict=verdict, details=feedback))
+            feedback_sources.append(
+                FeedbackSource(type="visual", verdict=verdict, details=feedback)
+            )
             continue
 
         if step_name == "inspect":
@@ -1303,7 +1306,9 @@ def init_command(
     selected_engine = backend or role_backend.engine
     selected_model = model or role_backend.model
     if selected_model:
-        click.echo(f"[init] Generating plan with backend '{selected_engine}' (model: {selected_model})")
+        click.echo(
+            f"[init] Generating plan with backend '{selected_engine}' (model: {selected_model})"
+        )
     else:
         click.echo(f"[init] Generating plan with backend '{selected_engine}'")
 

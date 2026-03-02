@@ -13,6 +13,22 @@ LOCAL_CONFIG_FILENAME: str = "ralph-config.yaml"
 GLOBAL_CONFIG_PATH: Path = Path("~/.config/ralph-loop/config.yaml")
 
 
+def _get_superproject_root() -> Path | None:
+    """Return the host (superproject) root when running inside a submodule."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-superproject-working-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip()).resolve()
+    except FileNotFoundError:
+        pass
+    return None
+
+
 def _get_repo_root() -> Path | None:
     """Return the host repo root, preferring the superproject when inside a submodule.
 
@@ -20,15 +36,9 @@ def _get_repo_root() -> Path | None:
     """
     try:
         # If we are a submodule, this returns the host (superproject) root.
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-superproject-working-tree"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        superproject = result.stdout.strip() if result.returncode == 0 else ""
+        superproject = _get_superproject_root()
         if superproject:
-            return Path(superproject).resolve()
+            return superproject
 
         # Not a submodule — fall back to the repo root.
         result = subprocess.run(
@@ -73,15 +83,18 @@ def resolve_config_path() -> str:
     if env_path:
         return env_path  # trust the user; existence checked by RalphConfig.load
 
-    # 2. Local ralph-config.yaml in CWD
+    superproject_root = _get_superproject_root()
+
+    # 2. Local ralph-config.yaml in CWD (skip when inside submodule)
     cwd = Path.cwd().resolve()
-    local_candidate = cwd / LOCAL_CONFIG_FILENAME
-    attempted.append(str(local_candidate))
-    if local_candidate.is_file():
-        return str(local_candidate)
+    if superproject_root is None:
+        local_candidate = cwd / LOCAL_CONFIG_FILENAME
+        attempted.append(str(local_candidate))
+        if local_candidate.is_file():
+            return str(local_candidate)
 
     # 3. Host repo root ralph-config.yaml
-    repo_root = _get_repo_root()
+    repo_root = superproject_root or _get_repo_root()
     if repo_root and repo_root != cwd:
         repo_candidate = repo_root / LOCAL_CONFIG_FILENAME
         attempted.append(str(repo_candidate))

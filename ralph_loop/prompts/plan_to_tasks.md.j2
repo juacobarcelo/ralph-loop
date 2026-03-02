@@ -44,6 +44,7 @@ Rules:
 - Do not prefix `verify_commands` with `cd tmp/product` (or any `cd` to the workspace path).
 - Include `visual_verify` for tasks that explicitly require visual checks.
 - If visual verification should inspect only the current screenshot, set `visual_verify.reference` to `null`.
+- If additional directives conflict with inferred hints, additional directives take precedence.
 - Output valid JSON with double quotes only.
 
 {% if project_instructions %}
@@ -53,3 +54,8 @@ Project instructions:
 
 Source plan:
 {{ source_content }}
+
+{% if user_directives %}
+Additional directives (highest priority):
+{{ user_directives }}
+{% endif %}

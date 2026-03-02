@@ -244,6 +244,220 @@ Visual verification requirement:
     assert visual_tasks[0]["visual_verify"]["reference"] is None
 
 
+def test_init_includes_inline_instructions_in_prompt(sample_workspace: Path, monkeypatch) -> None:
+    captured_prompt: dict[str, str] = {}
+
+    class _FakeBackend:
+        def is_available(self) -> bool:
+            return True
+
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = model, timeout_seconds, extra_flags, cwd
+            captured_prompt["value"] = prompt
+            payload = {
+                "title": "Demo Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [
+                            {
+                                "id": "01",
+                                "title": "Create feature",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+                duration_seconds = 0.1
+                timed_out = False
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
+
+    plan_path = sample_workspace / "plan-inline-directives.md"
+    plan_path.write_text("# Plan\n- [ ] Create feature", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--instructions",
+            "Review visually that the video list renders correctly.",
+            "--config",
+            str(sample_workspace / "ralph-config.yaml"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Additional directives (highest priority):" in captured_prompt["value"]
+    assert "Review visually that the video list renders correctly." in captured_prompt["value"]
+
+
+def test_init_includes_instructions_file_and_inline_in_prompt(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    captured_prompt: dict[str, str] = {}
+
+    class _FakeBackend:
+        def is_available(self) -> bool:
+            return True
+
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = model, timeout_seconds, extra_flags, cwd
+            captured_prompt["value"] = prompt
+            payload = {
+                "title": "Demo Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [
+                            {
+                                "id": "01",
+                                "title": "Create feature",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+                duration_seconds = 0.1
+                timed_out = False
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
+
+    plan_path = sample_workspace / "plan-file-directives.md"
+    plan_path.write_text("# Plan\n- [ ] Create feature", encoding="utf-8")
+
+    directives_path = sample_workspace / "directives.md"
+    directives_path.write_text(
+        "Check only at the end visually that all buttons are legible.",
+        encoding="utf-8",
+    )
+
+    inline_directive = "Review visually that the video list renders correctly."
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--instructions-file",
+            str(directives_path),
+            "--instructions",
+            inline_directive,
+            "--config",
+            str(sample_workspace / "ralph-config.yaml"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    prompt_value = captured_prompt["value"]
+    assert "Check only at the end visually that all buttons are legible." in prompt_value
+    assert inline_directive in prompt_value
+    assert prompt_value.index(
+        "Check only at the end visually that all buttons are legible."
+    ) < prompt_value.index(inline_directive)
+
+
+def test_init_fallback_visual_directive_only_at_end(sample_workspace: Path, monkeypatch) -> None:
+    class _UnavailableBackend:
+        def is_available(self) -> bool:
+            return False
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+
+    plan_path = sample_workspace / "plan-visual-end-only.md"
+    plan_path.write_text(
+        """# Plan
+
+- [ ] Build homepage layout
+- [ ] Improve homepage button readability
+""",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--instructions",
+            "Revisar solo al final visualmente que todos los botones estén desplegados y sean legibles.",
+            "--config",
+            str(sample_workspace / "ralph-config.yaml"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    progress = yaml.safe_load((sample_workspace / "PROGRESS.yaml").read_text(encoding="utf-8"))
+    tasks = progress["phases"][0]["tasks"]
+    visual_tasks = [task for task in tasks if task["visual_verify"] is not None]
+    assert len(visual_tasks) == 1
+    assert visual_tasks[0]["id"] == "02"
+
+
+def test_init_fallback_visual_directive_targets_specific_task(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    class _UnavailableBackend:
+        def is_available(self) -> bool:
+            return False
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+
+    plan_path = sample_workspace / "plan-visual-targeted.md"
+    plan_path.write_text(
+        """# Plan
+
+- [ ] Crear API de videos
+- [ ] Renderizar lista de videos
+- [ ] Añadir tests
+""",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--instructions",
+            "Revisar visualmente que la lista de videos se obtiene correctamente.",
+            "--config",
+            str(sample_workspace / "ralph-config.yaml"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    progress = yaml.safe_load((sample_workspace / "PROGRESS.yaml").read_text(encoding="utf-8"))
+    tasks = progress["phases"][0]["tasks"]
+    visual_tasks = [task for task in tasks if task["visual_verify"] is not None]
+    assert len(visual_tasks) == 1
+    assert visual_tasks[0]["id"] == "02"
+
+
 def test_init_creates_target_directories_when_missing(sample_workspace: Path, monkeypatch) -> None:
     config_path = sample_workspace / "ralph-config.missing-dirs.yaml"
     workspace_dir = sample_workspace / "generated" / "workspace"

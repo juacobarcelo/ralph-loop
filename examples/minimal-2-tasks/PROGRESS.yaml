@@ -1,0 +1,30 @@
+meta:
+  title: Minimal Example
+  started: "2026-03-01"
+  current_phase: 1
+
+phases:
+  - id: 1
+    name: Bootstrap
+    status: not_started
+    tasks:
+      - id: "01"
+        title: Hello world module
+        task_file: tasks/01-hello-world.md
+        contract_file: null
+        status: not_started
+        retries: 0
+        verify_commands:
+          - "echo verify"
+        visual_verify: null
+        feedback: []
+      - id: "02"
+        title: Add tests
+        task_file: tasks/02-add-tests.md
+        contract_file: null
+        status: not_started
+        retries: 0
+        verify_commands:
+          - "echo verify"
+        visual_verify: null
+        feedback: []

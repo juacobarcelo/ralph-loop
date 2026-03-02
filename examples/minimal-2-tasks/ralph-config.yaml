@@ -1,0 +1,26 @@
+progress_file: PROGRESS.yaml
+task_dir: tasks/
+max_retries: 3
+pause_file: PAUSE.md
+workspace_dir: .
+
+backends:
+  coder:
+    engine: codex
+    model: gpt-5.3-codex
+    timeout_seconds: 600
+  inspector:
+    engine: copilot
+    model: claude-opus-4-6
+    timeout_seconds: 300
+
+verify_commands:
+  - "echo verify"
+
+auth:
+  codex:
+    env: [OPENAI_API_KEY]
+    mount: []
+  copilot:
+    env: []
+    mount: ["~/.config/gh"]

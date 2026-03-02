@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+from ralph_loop.progress import FeedbackEntry
+
+
+def truncate_output(output: str, max_chars: int = 4000) -> str:
+    """Return the tail of output limited to max_chars."""
+    if len(output) <= max_chars:
+        return output
+    return output[-max_chars:]
+
+
+def format_feedback_for_prompt(feedback_entries: list[FeedbackEntry]) -> str:
+    """Format accumulated feedback entries as markdown for coder prompts."""
+    if not feedback_entries:
+        return ""
+
+    lines: list[str] = ["## Previous Attempt Feedback", ""]
+    for entry in feedback_entries:
+        lines.append(f"### Attempt {entry.attempt} ({entry.timestamp})")
+        lines.append("")
+
+        for source in entry.sources:
+            if source.type == "test":
+                lines.extend(
+                    [
+                        "**Test result:**",
+                        f"- Verdict: {source.verdict.upper()}",
+                        f"- Command: `{source.command or 'n/a'}`",
+                        f"- Exit code: {source.exit_code if source.exit_code is not None else 'n/a'}",
+                    ]
+                )
+                if source.output:
+                    lines.append("- Output:")
+                    lines.append("```")
+                    lines.append(truncate_output(source.output))
+                    lines.append("```")
+            else:
+                lines.extend(
+                    [
+                        f"**{source.type.replace('_', ' ').title()}:**",
+                        f"- Verdict: {source.verdict.upper()}",
+                        f"- Details: {source.details or 'n/a'}",
+                    ]
+                )
+            lines.append("")
+
+    return "\n".join(lines).strip() + "\n"

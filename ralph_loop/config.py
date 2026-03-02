@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -7,6 +9,92 @@ from pydantic import BaseModel, Field, field_validator
 
 
 PROJECT_INSTRUCTIONS_FILENAMES: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md", "COPILOT.md")
+LOCAL_CONFIG_FILENAME: str = "ralph-config.yaml"
+GLOBAL_CONFIG_PATH: Path = Path("~/.config/ralph-loop/config.yaml")
+
+
+def _get_repo_root() -> Path | None:
+    """Return the host repo root, preferring the superproject when inside a submodule.
+
+    Returns ``None`` if *git* is unavailable or CWD is not inside a git repository.
+    """
+    try:
+        # If we are a submodule, this returns the host (superproject) root.
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-superproject-working-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        superproject = result.stdout.strip() if result.returncode == 0 else ""
+        if superproject:
+            return Path(superproject).resolve()
+
+        # Not a submodule — fall back to the repo root.
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip()).resolve()
+    except FileNotFoundError:
+        # git is not installed.
+        pass
+    return None
+
+
+class ConfigNotFoundError(FileNotFoundError):
+    """Raised when no configuration file can be found in any searched location."""
+
+    def __init__(self, attempted: list[str]) -> None:
+        paths_list = "\n  - ".join(attempted)
+        super().__init__(f"No ralph-loop config file found. Searched (in order):\n  - {paths_list}")
+        self.attempted = attempted
+
+
+def resolve_config_path() -> str:
+    """Resolve the config file path using the precedence chain.
+
+    Precedence (highest to lowest):
+      1. ``RALPH_CONFIG`` environment variable.
+      2. ``ralph-config.yaml`` in the current working directory.
+      3. ``ralph-config.yaml`` at the host/repo root (submodule-aware).
+      4. ``~/.config/ralph-loop/config.yaml`` (global fallback).
+
+    Raises:
+        ConfigNotFoundError: when no config file is found.
+    """
+    attempted: list[str] = []
+
+    # 1. RALPH_CONFIG env var
+    env_path = os.environ.get("RALPH_CONFIG")
+    if env_path:
+        return env_path  # trust the user; existence checked by RalphConfig.load
+
+    # 2. Local ralph-config.yaml in CWD
+    cwd = Path.cwd().resolve()
+    local_candidate = cwd / LOCAL_CONFIG_FILENAME
+    attempted.append(str(local_candidate))
+    if local_candidate.is_file():
+        return str(local_candidate)
+
+    # 3. Host repo root ralph-config.yaml
+    repo_root = _get_repo_root()
+    if repo_root and repo_root != cwd:
+        repo_candidate = repo_root / LOCAL_CONFIG_FILENAME
+        attempted.append(str(repo_candidate))
+        if repo_candidate.is_file():
+            return str(repo_candidate)
+
+    # 4. Global config
+    global_candidate = GLOBAL_CONFIG_PATH.expanduser().resolve()
+    attempted.append(str(global_candidate))
+    if global_candidate.is_file():
+        return str(global_candidate)
+
+    raise ConfigNotFoundError(attempted)
 
 
 class BackendConfig(BaseModel):

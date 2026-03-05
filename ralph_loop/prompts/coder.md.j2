@@ -51,3 +51,4 @@ This task failed on previous attempts. Fix all issues from previous feedback bef
 1. Implement the task end-to-end, including tests.
 2. Run verification commands before declaring done.
 3. Keep changes scoped to this task.
+4. `verify_commands` are executed by the ralph-loop `verify` step on the host. During `code`, do not run host-only commands such as `docker` or `docker compose` from inside the coding container.

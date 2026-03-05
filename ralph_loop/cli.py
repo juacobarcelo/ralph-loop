@@ -40,6 +40,7 @@ from ralph_loop.progress import (
     save_progress,
     select_next_task,
 )
+from ralph_loop.feedback import format_feedback_for_prompt
 from ralph_loop.task import Task
 from ralph_loop.verification.visual import run_visual_verification
 
@@ -171,13 +172,46 @@ def _resolve_task_file_path(task_file: str, config: RalphConfig) -> Path | None:
     return None
 
 
-def _build_coder_prompt(task: Any, config: RalphConfig) -> str:
-    task_path = _resolve_task_file_path(str(task.task_file), config)
-    if task_path is not None:
-        body = task_path.read_text(encoding="utf-8")
-    else:
-        body = f"# Task\n\n{task.title}"
-    return body
+def _build_coder_prompt(task_progress: Any, config: RalphConfig) -> str:
+    """Render the coder prompt through the Jinja2 template, including retry feedback."""
+    task_path = _resolve_task_file_path(str(task_progress.task_file), config)
+    if task_path is None:
+        return f"# Task\n\n{task_progress.title}"
+
+    try:
+        task = Task.load(str(task_path))
+    except (ValidationError, Exception):
+        # Task file lacks structured frontmatter — fall back to raw content
+        return task_path.read_text(encoding="utf-8")
+
+    is_retry = getattr(task_progress, "retries", 0) > 0
+    feedback_entries = getattr(task_progress, "feedback", [])
+    attempt_number = getattr(task_progress, "retries", 0) + 1
+
+    project_instructions: str | None = None
+    if config.project_instructions:
+        pi_path = Path(config.project_instructions)
+        if pi_path.exists():
+            project_instructions = pi_path.read_text(encoding="utf-8")
+
+    contract_content: str | None = None
+    contract_file = getattr(task_progress, "contract_file", None)
+    if contract_file:
+        c_path = Path(contract_file)
+        if c_path.exists():
+            contract_content = c_path.read_text(encoding="utf-8")
+
+    template_path = Path(__file__).resolve().parent / "prompts" / "coder.md.j2"
+    template = Template(template_path.read_text(encoding="utf-8"))
+    return template.render(
+        task=task,
+        previous_feedback=format_feedback_for_prompt(feedback_entries),
+        is_retry=is_retry,
+        attempt_number=attempt_number,
+        max_retries=config.max_retries,
+        project_instructions=project_instructions,
+        contract_content=contract_content,
+    )
 
 
 def _build_inspector_prompt(task: Any, verification_results: list[dict[str, Any]] | None) -> str:
@@ -189,7 +223,7 @@ def _build_inspector_prompt(task: Any, verification_results: list[dict[str, Any]
         "Hard rules:",
         "- If any deterministic verification failed, verdict MUST be `fail`.",
     ]
-    if task.visual_verify is not None:
+    if getattr(task, "visual_verify", None) is not None:
         lines.append("- If visual verification failed or could not run, verdict MUST be `fail`.")
     lines.extend([
         "- Return `pass` only when all acceptance checks are green.",

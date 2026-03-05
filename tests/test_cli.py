@@ -1394,6 +1394,7 @@ def test_build_inspector_prompt_includes_failure_gates() -> None:
     class _Task:
         id = "01"
         title = "Demo"
+        visual_verify = {"type": "screenshot", "url": "http://localhost:3001"}
 
     prompt = cli_module._build_inspector_prompt(_Task(), [{"step": "visual"}])
 

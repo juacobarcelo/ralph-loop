@@ -57,6 +57,8 @@ def run_verification_pipeline(
     else:
         effective_visual_config = config.get_backend("inspector")
 
+    inspector_config = config.get_backend("inspector")
+
     visual_result = run_visual_verification(
         config=task_progress.visual_verify or task.frontmatter.visual_verify,
         workspace_dir=config.workspace_dir,
@@ -76,7 +78,6 @@ def run_verification_pipeline(
         FeedbackSource(type="visual", verdict=visual_result.verdict, details=visual_result.details)
     )
 
-    inspector_config = config.get_backend("inspector")
     inspection = run_ai_inspection(
         task=task,
         workspace_dir=config.workspace_dir,

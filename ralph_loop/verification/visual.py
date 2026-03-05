@@ -49,11 +49,22 @@ def run_visual_verification(
     workspace = Path(workspace_dir).resolve()
     reference_path: Path | None = None
     if config.reference:
-        reference_path = _resolve_reference_path(config.reference, workspace)
-        if not reference_path.exists():
+        reference_result = _resolve_reference_image(
+            reference=config.reference,
+            workspace=workspace,
+            viewport_width=config.viewport_width,
+            viewport_height=config.viewport_height,
+        )
+        if reference_result.error is not None:
             return VisualVerificationResult(
                 verdict="fail",
-                details=f"visual reference image not found: {reference_path}",
+                details=reference_result.error,
+            )
+        reference_path = reference_result.path
+        if reference_path is None:
+            return VisualVerificationResult(
+                verdict="fail",
+                details="visual reference image could not be resolved",
             )
 
     screenshot_result = _capture_screenshot(config, workspace)
@@ -103,6 +114,12 @@ def run_visual_verification(
 
 @dataclass
 class _ScreenshotResult:
+    path: Path | None = None
+    error: str | None = None
+
+
+@dataclass
+class _ReferenceResult:
     path: Path | None = None
     error: str | None = None
 
@@ -206,6 +223,79 @@ def _resolve_local_path(path_value: str, workspace: Path) -> Path:
 
 def _resolve_reference_path(reference: str, workspace: Path) -> Path:
     return _resolve_local_path(reference, workspace)
+
+
+def _resolve_reference_image(
+    *,
+    reference: str,
+    workspace: Path,
+    viewport_width: int,
+    viewport_height: int,
+) -> _ReferenceResult:
+    parsed = urlparse(reference)
+
+    if parsed.scheme in {"http", "https", "data"}:
+        screenshot = _capture_url_screenshot(
+            raw_url=reference,
+            workspace=workspace,
+            viewport_width=viewport_width,
+            viewport_height=viewport_height,
+            output_prefix="reference",
+        )
+        if screenshot.error is not None:
+            return _ReferenceResult(
+                error=f"visual reference screenshot capture failed: {screenshot.error}"
+            )
+        return _ReferenceResult(path=screenshot.path)
+
+    reference_path = _resolve_reference_path(reference, workspace)
+    if not reference_path.exists():
+        return _ReferenceResult(error=f"visual reference image not found: {reference_path}")
+
+    return _ReferenceResult(path=reference_path)
+
+
+def _capture_url_screenshot(
+    *,
+    raw_url: str,
+    workspace: Path,
+    viewport_width: int,
+    viewport_height: int,
+    output_prefix: str,
+) -> _ScreenshotResult:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return _ScreenshotResult(
+            error="visual verification requested but playwright is not installed",
+        )
+
+    output_dir = workspace / ".ralph-tmp" / "visual"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = output_dir / f"{output_prefix}-{uuid.uuid4().hex}.jpg"
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(
+                viewport={
+                    "width": viewport_width,
+                    "height": viewport_height,
+                }
+            )
+            target_url = _normalize_visual_target_url(raw_url, workspace)
+            page.goto(target_url, wait_until="networkidle")
+            page.screenshot(
+                path=str(screenshot_path),
+                full_page=True,
+                type="jpeg",
+                quality=50,
+            )
+            browser.close()
+    except Exception as error:  # noqa: BLE001
+        return _ScreenshotResult(error=str(error))
+
+    return _ScreenshotResult(path=screenshot_path)
 
 
 def _render_visual_prompt(

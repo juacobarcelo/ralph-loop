@@ -48,7 +48,8 @@ This task failed on previous attempts. Fix all issues from previous feedback bef
 {% endif %}
 
 ## Instructions
-1. Implement the task end-to-end, including tests.
-2. Run verification commands before declaring done.
-3. Keep changes scoped to this task.
-4. `verify_commands` are executed by the ralph-loop `verify` step on the host. During `code`, do not run host-only commands such as `docker` or `docker compose` from inside the coding container.
+1. Implement the task end-to-end for code changes only.
+2. Keep changes scoped to this task.
+3. You are part of the coding step only. Testing and verification are handled by separate ralph-loop stages/agents.
+4. During `code`, do not run tests or visual verification tooling (for example: `jest`, `tsc`, `playwright`, screenshot checks, or `visual_verify` commands).
+5. `verify_commands` are executed by the ralph-loop `verify` step on the host. During `code`, do not run host-only commands such as `docker` or `docker compose` from inside the coding container.

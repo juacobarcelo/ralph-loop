@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from ralph_loop.task import Task
+from ralph_loop.task import Task, TaskJson, validate_task_file
 
 
 def test_task_load_parses_frontmatter_and_sections(tmp_path: Path) -> None:
@@ -78,3 +79,51 @@ Do work.
 
     task = Task.load(str(task_file))
     assert task.get_verify_commands(["pytest tests/"]) == ["pytest tests/"]
+
+
+def test_task_json_load_and_validate(tmp_path: Path) -> None:
+    task_file = tmp_path / "01-sample.json"
+    payload = {
+        "id": "01",
+        "title": "Sample JSON Task",
+        "phase": 1,
+        "priority": "high",
+        "coding": {
+            "description": "Implement endpoint",
+            "acceptance_criteria": ["Returns 200"],
+            "files_to_touch": ["src/api.py"],
+            "files_not_to_touch": ["src/core.py"],
+            "constraints": ["No core changes"],
+            "reference_impl": None,
+        },
+        "verify": {"commands": ["pytest tests/test_api.py"]},
+        "visual": {
+            "url": "http://localhost:3001",
+            "assertion": "Header is visible",
+            "reference": None,
+            "viewport_width": 1280,
+            "viewport_height": 720,
+            "setup_commands": [],
+            "teardown_commands": [],
+            "acceptance_criteria": ["Header is visible"],
+        },
+        "inspect": {
+            "acceptance_criteria": ["Returns 200"],
+            "description_summary": "Implement endpoint",
+        },
+    }
+    task_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    task = TaskJson.load(task_file)
+    assert task.title == "Sample JSON Task"
+    assert task.verify.commands == ["pytest tests/test_api.py"]
+    assert task.visual_verify is not None
+    assert validate_task_file(task_file) == []
+
+
+def test_validate_task_file_reports_invalid_json(tmp_path: Path) -> None:
+    task_file = tmp_path / "broken.json"
+    task_file.write_text("{invalid", encoding="utf-8")
+    errors = validate_task_file(task_file)
+    assert errors
+    assert "Invalid JSON" in errors[0]

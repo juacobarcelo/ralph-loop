@@ -143,12 +143,12 @@ def test_init_command_generates_files_with_backend_output(
     )
     assert result.exit_code == 0
 
-    generated_task = sample_workspace / "tasks" / "01-create-feature.md"
+    generated_task = sample_workspace / "tasks" / "01-create-feature.json"
     assert generated_task.exists()
-    generated_task_content = generated_task.read_text(encoding="utf-8")
-    assert "verify_commands:" in generated_task_content
-    assert "visual_verify:" in generated_task_content
-    assert "reference: references/home.jpg" in generated_task_content
+    generated_task_payload = json.loads(generated_task.read_text(encoding="utf-8"))
+    assert generated_task_payload["verify"]["commands"] == ["pytest tests/"]
+    assert generated_task_payload["visual"]["reference"] == "references/home.jpg"
+    assert generated_task_payload["coding"]["files_to_touch"] == ["src/feature.py"]
 
     progress_path = sample_workspace / "PROGRESS.yaml"
     payload = yaml.safe_load(progress_path.read_text(encoding="utf-8"))
@@ -180,7 +180,7 @@ def test_init_command_fails_when_backend_unavailable(sample_workspace: Path, mon
         ],
     )
     assert result.exit_code != 0
-    assert "requires AI generation" in result.output
+    assert "after 3 attempts" in result.output
 
 
 def test_init_command_fails_when_backend_output_is_invalid(
@@ -220,7 +220,7 @@ def test_init_command_fails_when_backend_output_is_invalid(
     )
 
     assert result.exit_code != 0
-    assert "requires AI generation" in result.output
+    assert "after 3 attempts" in result.output
 
 
 def test_init_applies_verify_and_visual_hints(sample_workspace: Path, monkeypatch) -> None:
@@ -776,7 +776,7 @@ def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, mon
 
     assert result.exit_code == 0
     loop_dir = workspace / ".ralph-loop" / "my-feature-plan"
-    assert (loop_dir / "tasks" / "01-setup-project.md").exists()
+    assert (loop_dir / "tasks" / "01-setup-project.json").exists()
     assert (loop_dir / "PROGRESS.yaml").exists()
     assert (loop_dir / "product").exists()
 

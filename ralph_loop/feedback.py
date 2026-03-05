@@ -3,6 +3,32 @@ from __future__ import annotations
 from ralph_loop.progress import FeedbackEntry
 
 
+def filter_feedback_for_coder(feedback_entries: list[FeedbackEntry]) -> list[FeedbackEntry]:
+    """Return feedback sources relevant for the coding step."""
+    filtered: list[FeedbackEntry] = []
+    for entry in feedback_entries:
+        sources = []
+        for source in entry.sources:
+            if source.type in {"code", "ai_inspection"}:
+                sources.append(source.model_copy(deep=True))
+                continue
+            if source.type == "visual":
+                visual_source = source.model_copy(deep=True)
+                visual_source.command = None
+                visual_source.exit_code = None
+                visual_source.output = None
+                sources.append(visual_source)
+        if sources:
+            filtered.append(
+                FeedbackEntry(
+                    attempt=entry.attempt,
+                    timestamp=entry.timestamp,
+                    sources=sources,
+                )
+            )
+    return filtered
+
+
 def truncate_output(output: str, max_chars: int = 4000) -> str:
     """Return the tail of output limited to max_chars."""
     if len(output) <= max_chars:

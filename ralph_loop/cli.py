@@ -16,6 +16,7 @@ from jinja2 import Template
 from pydantic import BaseModel, Field, ValidationError
 
 from ralph_loop.backends import get_backend
+from ralph_loop.backends.base import ExecutionResult
 from ralph_loop.config import (
     BackendConfig,
     ConfigNotFoundError,
@@ -40,8 +41,8 @@ from ralph_loop.progress import (
     save_progress,
     select_next_task,
 )
-from ralph_loop.feedback import format_feedback_for_prompt
-from ralph_loop.task import Task
+from ralph_loop.feedback import filter_feedback_for_coder, format_feedback_for_prompt
+from ralph_loop.task import Task, TaskJson, validate_task_file
 from ralph_loop.verification.visual import run_visual_verification
 
 
@@ -83,6 +84,44 @@ class GeneratedTask(BaseModel):
     files_not_to_touch: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     reference_impl: str | None = None
+
+    def to_task_json(self, *, phase_id: int, task_id: str) -> TaskJson:
+        summary_source = (self.description or self.title).strip()
+        return TaskJson.model_validate(
+            {
+                "id": task_id,
+                "title": self.title,
+                "phase": phase_id,
+                "priority": self.priority,
+                "coding": {
+                    "description": self.description,
+                    "acceptance_criteria": self.acceptance_criteria,
+                    "files_to_touch": self.files_to_touch,
+                    "files_not_to_touch": self.files_not_to_touch,
+                    "constraints": self.constraints,
+                    "reference_impl": self.reference_impl,
+                },
+                "verify": {"commands": self.verify_commands},
+                "visual": (
+                    {
+                        "url": self.visual_verify.url,
+                        "assertion": self.visual_verify.assertion,
+                        "reference": self.visual_verify.reference,
+                        "viewport_width": self.visual_verify.viewport_width,
+                        "viewport_height": self.visual_verify.viewport_height,
+                        "setup_commands": self.visual_verify.setup_commands,
+                        "teardown_commands": self.visual_verify.teardown_commands,
+                        "acceptance_criteria": self.acceptance_criteria,
+                    }
+                    if self.visual_verify is not None
+                    else None
+                ),
+                "inspect": {
+                    "acceptance_criteria": self.acceptance_criteria,
+                    "description_summary": summary_source[:200],
+                },
+            }
+        )
 
 
 class GeneratedPhase(BaseModel):
@@ -172,6 +211,43 @@ def _resolve_task_file_path(task_file: str, config: RalphConfig) -> Path | None:
     return None
 
 
+def _load_task_document(task_progress: Any, config: RalphConfig) -> Task | TaskJson | None:
+    task_path = _resolve_task_file_path(str(task_progress.task_file), config)
+    if task_path is None:
+        return None
+    try:
+        if task_path.suffix.lower() == ".json":
+            return TaskJson.load(task_path)
+        return Task.load(str(task_path))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _task_verify_commands(task_progress: Any, config: RalphConfig) -> list[str]:
+    task_doc = _load_task_document(task_progress, config)
+    if isinstance(task_doc, TaskJson):
+        return task_doc.verify.commands or config.verify_commands
+    if isinstance(task_doc, Task):
+        return task_doc.get_verify_commands(config.verify_commands)
+    return task_progress.verify_commands or config.verify_commands
+
+
+def _task_visual_verify(task_progress: Any, config: RalphConfig) -> VisualVerifyConfig | None:
+    task_doc = _load_task_document(task_progress, config)
+    if isinstance(task_doc, TaskJson):
+        return task_doc.visual_verify
+    if isinstance(task_doc, Task):
+        return task_doc.frontmatter.visual_verify
+    return None
+
+
+def _task_for_inspector(task_progress: Any, config: RalphConfig) -> Any:
+    task_doc = _load_task_document(task_progress, config)
+    if task_doc is not None:
+        return task_doc
+    return task_progress
+
+
 def _build_coder_prompt(task_progress: Any, config: RalphConfig) -> str:
     """Render the coder prompt through the Jinja2 template, including retry feedback."""
     task_path = _resolve_task_file_path(str(task_progress.task_file), config)
@@ -179,10 +255,31 @@ def _build_coder_prompt(task_progress: Any, config: RalphConfig) -> str:
         return f"# Task\n\n{task_progress.title}"
 
     try:
-        task = Task.load(str(task_path))
+        task_doc: Task | TaskJson
+        if task_path.suffix.lower() == ".json":
+            task_doc = TaskJson.load(task_path)
+        else:
+            task_doc = Task.load(str(task_path))
     except (ValidationError, Exception):
         # Task file lacks structured frontmatter — fall back to raw content
         return task_path.read_text(encoding="utf-8")
+
+    if isinstance(task_doc, TaskJson):
+        task_title = task_doc.title
+        task_description = task_doc.description
+        acceptance_criteria = task_doc.acceptance_criteria
+        files_to_touch = task_doc.files_to_touch
+        files_not_to_touch = task_doc.files_not_to_touch
+        constraints = task_doc.constraints
+        reference_impl = task_doc.reference_impl
+    else:
+        task_title = task_doc.title
+        task_description = task_doc.description
+        acceptance_criteria = task_doc.acceptance_criteria
+        files_to_touch = task_doc.frontmatter.files_to_touch
+        files_not_to_touch = task_doc.frontmatter.files_not_to_touch
+        constraints = task_doc.constraints
+        reference_impl = task_doc.reference_impl
 
     is_retry = getattr(task_progress, "retries", 0) > 0
     feedback_entries = getattr(task_progress, "feedback", [])
@@ -204,8 +301,14 @@ def _build_coder_prompt(task_progress: Any, config: RalphConfig) -> str:
     template_path = Path(__file__).resolve().parent / "prompts" / "coder.md.j2"
     template = Template(template_path.read_text(encoding="utf-8"))
     return template.render(
-        task=task,
-        previous_feedback=format_feedback_for_prompt(feedback_entries),
+        task_title=task_title,
+        task_description=task_description,
+        acceptance_criteria=acceptance_criteria,
+        files_to_touch=files_to_touch,
+        files_not_to_touch=files_not_to_touch,
+        constraints=constraints,
+        reference_impl=reference_impl,
+        previous_feedback=format_feedback_for_prompt(filter_feedback_for_coder(feedback_entries)),
         is_retry=is_retry,
         attempt_number=attempt_number,
         max_retries=config.max_retries,
@@ -215,15 +318,35 @@ def _build_coder_prompt(task_progress: Any, config: RalphConfig) -> str:
 
 
 def _build_inspector_prompt(task: Any, verification_results: list[dict[str, Any]] | None) -> str:
+    acceptance_criteria = getattr(task, "acceptance_criteria", [])
+    description_summary = getattr(task, "description", "")
+    visual_verify = getattr(task, "visual_verify", None)
+    if isinstance(task, TaskJson):
+        acceptance_criteria = task.inspect.acceptance_criteria or task.acceptance_criteria
+        description_summary = task.inspect.description_summary or task.description
+        visual_verify = task.visual_verify
+
     lines = [
         f"# Inspect Task {task.id}: {task.title}",
+        "",
+        "## Task Context",
+        description_summary,
+        "",
+        "## Acceptance Criteria",
+    ]
+    if acceptance_criteria:
+        lines.extend([f"{index + 1}. {item}" for index, item in enumerate(acceptance_criteria)])
+    else:
+        lines.append("1. Validate task completion.")
+
+    lines.extend([
         "",
         "Review task result and return strict JSON:",
         "",
         "Hard rules:",
         "- If any deterministic verification failed, verdict MUST be `fail`.",
-    ]
-    if getattr(task, "visual_verify", None) is not None:
+    ])
+    if visual_verify is not None:
         lines.append("- If visual verification failed or could not run, verdict MUST be `fail`.")
     lines.extend([
         "- Return `pass` only when all acceptance checks are green.",
@@ -257,7 +380,7 @@ def _parse_inspector_output(stdout: str) -> tuple[str, str]:
             feedback = str(parsed.get("feedback", "")).strip()
             if verdict in {"pass", "fail"}:
                 return verdict, feedback
-    except json.JSONDecodeError:
+    except (ValueError, json.JSONDecodeError):
         pass
     return "fail", stdout.strip() or "Inspector output could not be parsed as JSON"
 
@@ -328,9 +451,9 @@ def _run_prompt_with_available_backend(
         cwd=str(backend_cwd),
     )
 
-    if result.stdout:
+    if result.stdout and not result.output_streamed:
         click.echo(result.stdout, nl=False)
-    if result.stderr:
+    if result.stderr and not result.output_streamed:
         click.echo(result.stderr, err=True, nl=False)
 
     return int(result.exit_code)
@@ -807,89 +930,103 @@ def _generate_plan_with_backend(
     prompt: str,
     backend_override: str | None,
     model_override: str | None,
-) -> GeneratedPlan | None:
+    validation_feedback: str | None = None,
+) -> tuple[GeneratedPlan | None, str | None, ExecutionResult | None, str]:
     role_backend = _select_init_backend(config)
     engine = backend_override or role_backend.engine
     model = model_override or role_backend.model
 
     backend = get_backend(engine)
     if not backend.is_available():
-        return None
+        return None, f"Backend '{engine}' is not available", None, prompt
+
+    prompt_with_feedback = prompt
+    if validation_feedback:
+        prompt_with_feedback = (
+            f"{prompt}\n\n"
+            "## Validation Errors\n"
+            f"{validation_feedback.strip()}\n\n"
+            "Fix these errors and regenerate the complete plan as strict JSON."
+        )
 
     try:
         result = backend.execute(
-            prompt=prompt,
+            prompt=prompt_with_feedback,
             model=model,
             timeout_seconds=role_backend.timeout_seconds,
             extra_flags=role_backend.extra_flags,
             cwd=config.workspace_dir,
         )
     except OSError:
-        return None
+        return None, f"Backend '{engine}' failed to start", None, prompt_with_feedback
 
     if result.exit_code != 0:
-        return None
+        details = result.stderr.strip() or f"Backend exited with code {result.exit_code}"
+        return None, details, result, prompt_with_feedback
 
     try:
         payload = _extract_first_json_object(result.stdout)
-        return GeneratedPlan.model_validate(payload)
-    except (ValidationError, ValueError, json.JSONDecodeError):
-        return None
+    except (ValueError, json.JSONDecodeError) as exc:
+        return None, f"Invalid JSON: {exc}", result, prompt_with_feedback
+
+    try:
+        return GeneratedPlan.model_validate(payload), None, result, prompt_with_feedback
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        return None, f"Plan schema validation failed: {exc}", result, prompt_with_feedback
 
 
-def _format_task_markdown(phase_id: int, task: GeneratedTask) -> str:
-    acceptance = (
-        "\n".join(
-            [
-                f"{index + 1}. {criterion}"
-                for index, criterion in enumerate(task.acceptance_criteria)
-            ]
-        )
-        or "1. Complete the requested implementation."
-    )
-    files_to_touch = (
-        "\n".join([f"- {file_path}" for file_path in task.files_to_touch]) or "- (to define)"
-    )
-    test_plan = task.test_plan or "1. Run the configured verification commands."
-    constraints = "\n".join([f"- {constraint}" for constraint in task.constraints]) or "- None"
-    frontmatter_payload: dict[str, object] = {
-        "phase": phase_id,
-        "priority": task.priority,
-        "verify_commands": task.verify_commands,
-        "visual_verify": task.visual_verify.model_dump(mode="json") if task.visual_verify else None,
-        "contract_file": None,
-        "files_to_touch": task.files_to_touch,
-        "files_not_to_touch": task.files_not_to_touch,
-    }
-    frontmatter = yaml.safe_dump(frontmatter_payload, sort_keys=False, allow_unicode=True).strip()
+def _truncate_for_log(text: str, max_chars: int = 1200) -> str:
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n...[truncated]"
 
-    reference_section = ""
-    if task.reference_impl:
-        reference_section = f"\n\n## Reference Implementation\n\n{task.reference_impl}"
 
-    not_to_touch_section = ""
-    if task.files_not_to_touch:
-        not_to_touch_section = "\n" + "\n".join(
-            [f"- {file_path}" for file_path in task.files_not_to_touch]
-        )
+def _write_init_attempt_artifacts(
+    *,
+    tmp_dir: Path,
+    attempt: int,
+    prompt_text: str,
+    result: ExecutionResult | None,
+) -> tuple[Path, Path | None, Path | None]:
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = tmp_dir / f"init-attempt-{attempt:02d}-prompt.md"
+    prompt_path.write_text(prompt_text, encoding="utf-8")
 
-    return (
-        f"---\n{frontmatter}\n---\n\n"
-        + f"# Task {task.id}: {task.title}\n\n"
-        + f"**Phase**: {phase_id}\n\n"
-        + "## Description\n\n"
-        + f"{task.description}\n\n"
-        + "## Acceptance Criteria\n\n"
-        + f"{acceptance}\n\n"
-        + "## Files to Create/Modify\n\n"
-        + f"{files_to_touch}\n\n"
-        + "## Test Plan\n\n"
-        + f"{test_plan}\n\n"
-        + "## Constraints\n\n"
-        + f"{constraints}{not_to_touch_section}"
-        + reference_section
-        + "\n"
-    )
+    if result is None:
+        return prompt_path, None, None
+
+    stdout_path = tmp_dir / f"init-attempt-{attempt:02d}-stdout.txt"
+    stderr_path = tmp_dir / f"init-attempt-{attempt:02d}-stderr.txt"
+    stdout_path.write_text(result.stdout, encoding="utf-8")
+    stderr_path.write_text(result.stderr, encoding="utf-8")
+    return prompt_path, stdout_path, stderr_path
+
+
+def _validate_generated_plan_tasks(plan: GeneratedPlan) -> list[str]:
+    errors: list[str] = []
+    task_counter = 0
+    for phase_index, phase in enumerate(plan.phases, start=1):
+        for task in phase.tasks:
+            task_counter += 1
+            task_id = f"{task_counter:02d}"
+            try:
+                task.to_task_json(phase_id=phase_index, task_id=task_id)
+            except ValidationError as exc:
+                errors.append(f"Task {task_id}: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Task {task_id}: {exc}")
+    return errors
+
+
+def _write_task_json(task_dir: Path, phase_id: int, task: GeneratedTask, task_id: str) -> Path:
+    slug = _slugify(task.title)
+    task_filename = f"{task_id}-{slug}.json"
+    task_path = task_dir / task_filename
+    task_json = task.to_task_json(phase_id=phase_id, task_id=task_id)
+    task_json.save(task_path)
+    return task_path
 
 
 def _write_generated_artifacts(ctx: _InitContext, plan: GeneratedPlan) -> tuple[int, Path, Path]:
@@ -904,14 +1041,8 @@ def _write_generated_artifacts(ctx: _InitContext, plan: GeneratedPlan) -> tuple[
         for task in phase.tasks:
             task_counter += 1
             task_id = f"{task_counter:02d}"
-            slug = _slugify(task.title)
-            task_filename = f"{task_id}-{slug}.md"
-            task_path = task_dir / task_filename
-            effective_task = task.model_copy(update={"id": task_id})
-            task_path.write_text(
-                _format_task_markdown(phase_index, effective_task),
-                encoding="utf-8",
-            )
+            task_path = _write_task_json(task_dir, phase_index, task, task_id)
+            task_json = TaskJson.load(task_path)
 
             phase_tasks.append(
                 {
@@ -921,9 +1052,11 @@ def _write_generated_artifacts(ctx: _InitContext, plan: GeneratedPlan) -> tuple[
                     "contract_file": None,
                     "status": "not_started",
                     "retries": 0,
-                    "verify_commands": task.verify_commands,
+                    "verify_commands": task_json.verify.commands,
                     "visual_verify": (
-                        task.visual_verify.model_dump(mode="json") if task.visual_verify else None
+                        task_json.visual_verify.model_dump(mode="json")
+                        if task_json.visual_verify
+                        else None
                     ),
                     "feedback": [],
                 }
@@ -1042,11 +1175,22 @@ def validate_command(config_path: str, loop_dir: str) -> None:
     if not task_dir.exists():
         raise click.ClickException(f"Task directory does not exist: {task_dir}")
 
-    task_files_on_disk = {path.resolve() for path in task_dir.glob("*.md")}
+    task_files_on_disk = {
+        path.resolve() for pattern in ("*.md", "*.json") for path in task_dir.glob(pattern)
+    }
     if missing_in_progress:
         raise click.ClickException(
             f"Task files referenced in progress are missing: {missing_in_progress}"
         )
+
+    validation_errors: list[str] = []
+    for task_path in sorted(progress_task_files):
+        if task_path.suffix.lower() != ".json":
+            continue
+        validation_errors.extend(validate_task_file(task_path))
+
+    if validation_errors:
+        raise click.ClickException("\n".join(validation_errors))
 
     not_referenced = [
         path for path in sorted(task_files_on_disk) if path not in progress_task_files
@@ -1098,7 +1242,8 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
         step_name = str(step_result.get("step", ""))
 
         if step_name == "code":
-            verify_commands = task.verify_commands or config.verify_commands
+            verify_commands = _task_verify_commands(task, config)
+            visual_config = _task_visual_verify(task, config) or task.visual_verify
             if verify_commands:
                 iteration["current_step"] = "verify"
                 _save_iteration_state(paths.iteration_path, iteration)
@@ -1114,7 +1259,7 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                 )
                 return
 
-            if task.visual_verify is not None:
+            if visual_config is not None:
                 visual_role = _visual_backend_role(config)
                 visual = config.get_backend(visual_role)
                 iteration["current_step"] = "visual"
@@ -1128,8 +1273,8 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                             "model": visual.model,
                             "timeout_seconds": visual.timeout_seconds,
                             "extra_flags": visual.extra_flags,
-                            "setup_commands": task.visual_verify.setup_commands,
-                            "teardown_commands": task.visual_verify.teardown_commands,
+                            "setup_commands": visual_config.setup_commands,
+                            "teardown_commands": visual_config.teardown_commands,
                             "workspace_dir": config.workspace_dir,
                             "auth": config.get_auth(visual.engine).model_dump(),
                         }
@@ -1137,7 +1282,7 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                 )
                 return
 
-            inspector_prompt = _build_inspector_prompt(task, None)
+            inspector_prompt = _build_inspector_prompt(_task_for_inspector(task, config), None)
             paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
             inspector = config.get_backend("inspector")
             iteration["current_step"] = "inspect"
@@ -1159,7 +1304,8 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
             return
 
         if step_name == "verify":
-            if task.visual_verify is not None:
+            visual_config = _task_visual_verify(task, config) or task.visual_verify
+            if visual_config is not None:
                 visual_role = _visual_backend_role(config)
                 visual = config.get_backend(visual_role)
                 iteration["current_step"] = "visual"
@@ -1173,8 +1319,8 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                             "model": visual.model,
                             "timeout_seconds": visual.timeout_seconds,
                             "extra_flags": visual.extra_flags,
-                            "setup_commands": task.visual_verify.setup_commands,
-                            "teardown_commands": task.visual_verify.teardown_commands,
+                            "setup_commands": visual_config.setup_commands,
+                            "teardown_commands": visual_config.teardown_commands,
                             "workspace_dir": config.workspace_dir,
                             "auth": config.get_auth(visual.engine).model_dump(),
                         }
@@ -1183,7 +1329,9 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                 return
 
             verification_results = _collect_verification_results(iteration)
-            inspector_prompt = _build_inspector_prompt(task, verification_results)
+            inspector_prompt = _build_inspector_prompt(
+                _task_for_inspector(task, config), verification_results
+            )
             paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
             inspector = config.get_backend("inspector")
             iteration["current_step"] = "inspect"
@@ -1206,7 +1354,9 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
 
         if step_name == "visual":
             verification_results = _collect_verification_results(iteration)
-            inspector_prompt = _build_inspector_prompt(task, verification_results)
+            inspector_prompt = _build_inspector_prompt(
+                _task_for_inspector(task, config), verification_results
+            )
             paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
             inspector = config.get_backend("inspector")
             iteration["current_step"] = "inspect"
@@ -1371,11 +1521,20 @@ def visual_command(
     task_path = _resolve_task_file_path(task_progress.task_file, config)
     if task_path is None:
         raise click.ClickException(f"Task file not found: {task_progress.task_file}")
-    task = Task.load(str(task_path))
+
+    task_doc = _load_task_document(task_progress, config)
+    if task_doc is None:
+        raise click.ClickException(f"Task file not found: {task_progress.task_file}")
+    if isinstance(task_doc, TaskJson):
+        task = task_doc.to_legacy_task(task_path)
+        visual_config = task_doc.visual_verify
+    else:
+        task = task_doc
+        visual_config = task_doc.frontmatter.visual_verify
 
     _, backend = _select_available_backend()
     inspector_cfg = config.get_backend("inspector")
-    visual_config = task_progress.visual_verify or task.frontmatter.visual_verify
+    visual_config = visual_config or task_progress.visual_verify
     result = run_visual_verification(
         config=visual_config,
         workspace_dir=config.workspace_dir,
@@ -1416,7 +1575,7 @@ def update_command(config_path: str, loop_dir: str, result_dir: str) -> None:
     feedback_sources: list[FeedbackSource] = []
     has_visual_result = False
     has_inspect_result = False
-    visual_required = task.visual_verify is not None
+    visual_required = (_task_visual_verify(task, config) or task.visual_verify) is not None
 
     for item in results:
         step_name = str(item.get("step", ""))
@@ -1596,6 +1755,8 @@ def init_command(
     config = _ensure_config(config_file, loop_dir=loop_dir)
     context = _InitContext(source_path=source, config=config)
     _ensure_init_directories(config)
+    runtime_paths = _runtime_paths(config)
+    runtime_paths.tmp_dir.mkdir(parents=True, exist_ok=True)
 
     click.echo(f"[init] Reading source design: {source}")
     source_content = source.read_text(encoding="utf-8")
@@ -1614,22 +1775,86 @@ def init_command(
     else:
         click.echo(f"[init] Generating plan with backend '{selected_engine}'")
 
-    generated_plan = _generate_plan_with_backend(
-        config=config,
-        prompt=prompt,
-        backend_override=backend,
-        model_override=model,
-    )
+    generated_plan: GeneratedPlan | None = None
+    validation_feedback: str | None = None
+    attempts = 3
+    previous_stream_setting = os.environ.get("RALPH_COPILOT_STREAM_OUTPUT")
+    os.environ["RALPH_COPILOT_STREAM_OUTPUT"] = "1"
+    try:
+        for attempt in range(1, attempts + 1):
+            candidate_plan, generation_error, generation_result, prompt_used = _generate_plan_with_backend(
+                config=config,
+                prompt=prompt,
+                backend_override=backend,
+                model_override=model,
+                validation_feedback=validation_feedback,
+            )
+            prompt_path, stdout_path, stderr_path = _write_init_attempt_artifacts(
+                tmp_dir=runtime_paths.tmp_dir,
+                attempt=attempt,
+                prompt_text=prompt_used,
+                result=generation_result,
+            )
+
+            if generation_result is not None:
+                click.echo(
+                    "[init] Attempt "
+                    f"{attempt}/{attempts} backend runtime: {generation_result.duration_seconds:.1f}s "
+                    f"(exit={generation_result.exit_code}, timed_out={generation_result.timed_out})"
+                )
+                click.echo(f"[init] Prompt artifact: {prompt_path}")
+                if stdout_path is not None:
+                    click.echo(f"[init] Backend stdout artifact: {stdout_path}")
+                if stderr_path is not None:
+                    click.echo(f"[init] Backend stderr artifact: {stderr_path}")
+
+            if candidate_plan is None:
+                validation_feedback = generation_error or "Unknown generation error"
+                click.echo(f"[init] Attempt {attempt}/{attempts} failed: {validation_feedback}")
+                if generation_result is not None:
+                    stderr_preview = _truncate_for_log(generation_result.stderr)
+                    stdout_preview = _truncate_for_log(generation_result.stdout)
+                    if stderr_preview:
+                        click.echo("[init] stderr preview:")
+                        click.echo(stderr_preview)
+                    if stdout_preview:
+                        click.echo("[init] stdout preview:")
+                        click.echo(stdout_preview)
+                continue
+
+            candidate_plan = _apply_plan_hints(
+                candidate_plan,
+                f"{source_content}\n\n{user_directives}",
+            )
+            task_errors = _validate_generated_plan_tasks(candidate_plan)
+            if task_errors:
+                validation_feedback = "\n".join(task_errors)
+                click.echo(f"[init] Attempt {attempt}/{attempts} failed task schema validation.")
+                continue
+
+            generated_plan = candidate_plan
+            break
+    finally:
+        if previous_stream_setting is None:
+            os.environ.pop("RALPH_COPILOT_STREAM_OUTPUT", None)
+        else:
+            os.environ["RALPH_COPILOT_STREAM_OUTPUT"] = previous_stream_setting
+
     if generated_plan is None:
+        final_error = validation_feedback or "Unknown generation error"
         raise click.ClickException(
-            "AI generation unavailable or invalid backend output. "
-            "`init` requires AI generation and does not support deterministic fallback."
+            "AI generation unavailable or invalid backend output after 3 attempts.\n"
+            f"{final_error}"
         )
 
     click.echo("[init] AI generation completed.")
-    generated_plan = _apply_plan_hints(generated_plan, f"{source_content}\n\n{user_directives}")
 
     click.echo("[init] Writing tasks and progress files...")
     count, task_dir, progress_path = _write_generated_artifacts(context, generated_plan)
+    json_validation_errors: list[str] = []
+    for task_path in sorted(task_dir.glob("*.json")):
+        json_validation_errors.extend(validate_task_file(task_path))
+    if json_validation_errors:
+        raise click.ClickException("\n".join(json_validation_errors))
     click.echo(f"Generated {count} task file(s) in {task_dir}")
     click.echo(f"Generated progress file: {progress_path}")

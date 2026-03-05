@@ -1,31 +1,28 @@
-# Task: {{ task.title }}
+# Task: {{ task_title }}
 
 ## Description
-{{ task.description }}
+{{ task_description }}
 
 ## Acceptance Criteria
-{% for criterion in task.acceptance_criteria %}
+{% for criterion in acceptance_criteria %}
 {{ loop.index }}. {{ criterion }}
 {% endfor %}
 
 ## Files to Create/Modify
-{% for file_path in task.frontmatter.files_to_touch %}
+{% for file_path in files_to_touch %}
 - `{{ file_path }}`
 {% endfor %}
 
-## Test Plan
-{{ task.test_plan }}
-
-{% if task.reference_impl %}
+{% if reference_impl %}
 ## Reference Implementation
-{{ task.reference_impl }}
+{{ reference_impl }}
 {% endif %}
 
 ## Constraints
-{% for constraint in task.constraints %}
+{% for constraint in constraints %}
 - {{ constraint }}
 {% endfor %}
-{% for file_path in task.frontmatter.files_not_to_touch %}
+{% for file_path in files_not_to_touch %}
 - Do NOT modify `{{ file_path }}`
 {% endfor %}
 

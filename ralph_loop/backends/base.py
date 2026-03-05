@@ -13,6 +13,7 @@ class ExecutionResult:
     stderr: str
     duration_seconds: float
     timed_out: bool = False
+    output_streamed: bool = False
 
 
 @runtime_checkable

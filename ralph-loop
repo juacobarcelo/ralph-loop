@@ -263,6 +263,22 @@ container_path_to_host_path() {
     echo "$path"
 }
 
+print_coder_prompt() {
+    local prompt_file="$1"
+    local prompt_file_host
+    prompt_file_host=$(container_path_to_host_path "$prompt_file")
+
+    if [[ ! -f "$prompt_file_host" ]]; then
+        log_warn "Task $TASK_ID: coder prompt file not found: $prompt_file_host"
+        return
+    fi
+
+    log_info "Task $TASK_ID: coder prompt file -> $prompt_file_host"
+    echo "[ralph] ----- BEGIN CODER PROMPT (task: $TASK_ID) -----"
+    cat "$prompt_file_host"
+    echo "[ralph] ----- END CODER PROMPT (task: $TASK_ID) -----"
+}
+
 build_backend_args() {
     BACKEND_ARGS=()
 
@@ -367,12 +383,14 @@ cmd_run() {
                 ;;
             code)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
+                PROMPT_FILE=$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")
                 build_backend_args
                 log_info "Task $TASK_ID: coding via $IMAGE..."
+                print_coder_prompt "$PROMPT_FILE"
                 set +e
                 SECONDS=0
                 run_cli "$IMAGE" execute \
-                    --prompt-file "$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")" \
+                    --prompt-file "$PROMPT_FILE" \
                     "${BACKEND_ARGS[@]}"
                 EXIT_CODE=$?
                 DURATION=$SECONDS

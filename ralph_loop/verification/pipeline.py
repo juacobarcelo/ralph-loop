@@ -65,6 +65,10 @@ def run_verification_pipeline(
         timeout_seconds=effective_visual_config.timeout_seconds,
         extra_flags=effective_visual_config.extra_flags,
         task=task,
+        inspector_backend=inspector_backend,
+        inspector_model=inspector_config.model,
+        inspector_timeout_seconds=inspector_config.timeout_seconds,
+        inspector_extra_flags=inspector_config.extra_flags,
     )
     if visual_result.verdict != "pass":
         all_passed = False

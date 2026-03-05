@@ -1340,6 +1340,7 @@ def visual_command(
     task = Task.load(str(task_path))
 
     _, backend = _select_available_backend()
+    inspector_cfg = config.get_backend("inspector")
     visual_config = task_progress.visual_verify or task.frontmatter.visual_verify
     result = run_visual_verification(
         config=visual_config,
@@ -1349,6 +1350,10 @@ def visual_command(
         timeout_seconds=timeout_seconds,
         extra_flags=list(extra_flags),
         task=task,
+        inspector_backend=backend,
+        inspector_model=inspector_cfg.model,
+        inspector_timeout_seconds=inspector_cfg.timeout_seconds,
+        inspector_extra_flags=inspector_cfg.extra_flags,
     )
     click.echo(json.dumps({"verdict": result.verdict, "feedback": result.details}))
 

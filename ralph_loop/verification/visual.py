@@ -39,6 +39,10 @@ def run_visual_verification(
     timeout_seconds: int,
     extra_flags: list[str],
     task: Task,
+    inspector_backend: Backend | None = None,
+    inspector_model: str | None = None,
+    inspector_timeout_seconds: int | None = None,
+    inspector_extra_flags: list[str] | None = None,
 ) -> VisualVerificationResult:
     """Run visual verification through screenshot capture and LLM review."""
     if config is None:
@@ -97,6 +101,10 @@ def run_visual_verification(
         timeout_seconds=timeout_seconds,
         extra_flags=extra_flags,
         cwd=str(workspace),
+        fallback_backend=inspector_backend,
+        fallback_model=inspector_model,
+        fallback_timeout_seconds=inspector_timeout_seconds,
+        fallback_extra_flags=inspector_extra_flags,
     )
 
     if response.exit_code != 0:
@@ -335,17 +343,17 @@ def _parse_or_normalize_visual_output(
     timeout_seconds: int,
     extra_flags: list[str],
     cwd: str,
+    fallback_backend: Backend | None = None,
+    fallback_model: str | None = None,
+    fallback_timeout_seconds: int | None = None,
+    fallback_extra_flags: list[str] | None = None,
 ) -> VisualVerdict:
     direct = _try_parse_verdict(raw_output)
     if direct is not None:
         return direct
 
-    normalization_prompt = (
-        "Normalize the following visual verification output into strict JSON with schema "
-        '{"verdict":"pass|fail","feedback":"string"}. '
-        "Return JSON only. If uncertain, set verdict to fail.\n\n"
-        f"RAW OUTPUT:\n{raw_output}"
-    )
+    normalization_prompt = _build_normalization_prompt(raw_output)
+
     normalized = backend.execute(
         prompt=normalization_prompt,
         model=model,
@@ -357,26 +365,61 @@ def _parse_or_normalize_visual_output(
     if normalized_parsed is not None:
         return normalized_parsed
 
+    if fallback_backend is not None:
+        normalized_fallback = fallback_backend.execute(
+            prompt=normalization_prompt,
+            model=fallback_model,
+            timeout_seconds=(
+                fallback_timeout_seconds if fallback_timeout_seconds is not None else timeout_seconds
+            ),
+            extra_flags=(fallback_extra_flags if fallback_extra_flags is not None else extra_flags),
+            cwd=cwd,
+        )
+        fallback_parsed = _try_parse_verdict(normalized_fallback.stdout)
+        if fallback_parsed is not None:
+            return fallback_parsed
+
     fallback_feedback = raw_output.strip() or "visual verifier output could not be normalized"
     return VisualVerdict(verdict="fail", feedback=fallback_feedback)
 
 
+def _build_normalization_prompt(raw_output: str) -> str:
+    return (
+        "Normalize the following visual verification output into strict JSON with schema "
+        '{"verdict":"pass|fail","feedback":"string"}. '
+        "Return JSON only. Resolve noisy output (logs + markdown + fenced json) to a single final verdict. "
+        "If uncertain, set verdict to fail.\n\n"
+        f"RAW OUTPUT:\n{raw_output}"
+    )
+
+
 def _try_parse_verdict(payload: str) -> VisualVerdict | None:
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError:
-        return None
+    for data in _extract_json_dicts(payload):
+        try:
+            parsed = VisualVerdict.model_validate(data)
+        except ValidationError:
+            continue
 
-    if not isinstance(data, dict):
-        return None
+        verdict = parsed.verdict.strip().lower()
+        if verdict not in {"pass", "fail"}:
+            continue
 
-    try:
-        parsed = VisualVerdict.model_validate(data)
-    except ValidationError:
-        return None
+        return VisualVerdict(verdict=verdict, feedback=parsed.feedback.strip())
 
-    verdict = parsed.verdict.strip().lower()
-    if verdict not in {"pass", "fail"}:
-        return None
+    return None
 
-    return VisualVerdict(verdict=verdict, feedback=parsed.feedback.strip())
+
+def _extract_json_dicts(payload: str) -> list[dict]:
+    decoder = json.JSONDecoder()
+    matches: list[dict] = []
+    for index, char in enumerate(payload):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(payload[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            matches.append(parsed)
+
+    return matches

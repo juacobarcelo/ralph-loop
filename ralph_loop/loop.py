@@ -64,18 +64,35 @@ def run_loop(config: RalphConfig, sandbox: str = "none") -> int:
             project_instructions=_load_optional_file(config.project_instructions),
             contract_content=_load_optional_file(task_progress.contract_file),
         )
+        coder_flags = _with_dynamic_codex_reasoning(
+            coder_cfg,
+            step="code",
+            task_retries=task_progress.retries,
+        )
         code_result = coder_backend.execute(
             prompt=coder_prompt,
             model=coder_cfg.model,
             timeout_seconds=coder_cfg.timeout_seconds,
-            extra_flags=coder_cfg.extra_flags,
+            extra_flags=coder_flags,
             cwd=config.workspace_dir,
         )
 
         inspector_cfg = config.get_backend("inspector")
+        inspector_flags = _with_dynamic_codex_reasoning(
+            inspector_cfg,
+            step="inspect",
+            task_retries=task_progress.retries,
+        )
+        effective_inspector_cfg = inspector_cfg.model_copy(update={"extra_flags": inspector_flags})
         inspector_backend = _make_backend(inspector_cfg, config, sandbox)
         visual_role = "visual" if "visual" in config.backends else "inspector"
         visual_cfg = config.get_backend(visual_role)
+        visual_flags = _with_dynamic_codex_reasoning(
+            visual_cfg,
+            step="visual",
+            task_retries=task_progress.retries,
+        )
+        effective_visual_cfg = visual_cfg.model_copy(update={"extra_flags": visual_flags})
         visual_backend = _make_backend(visual_cfg, config, sandbox)
         verify_commands = task.get_verify_commands(config.verify_commands)
         report = run_verification_pipeline(
@@ -83,9 +100,10 @@ def run_loop(config: RalphConfig, sandbox: str = "none") -> int:
             task_progress=task_progress,
             config=config,
             inspector_backend=inspector_backend,
+            inspector_backend_config=effective_inspector_cfg,
             verify_commands=verify_commands,
             visual_backend=visual_backend,
-            visual_backend_config=visual_cfg,
+            visual_backend_config=effective_visual_cfg,
         )
 
         if code_result.exit_code != 0:
@@ -112,6 +130,50 @@ def _make_backend(cfg: BackendConfig, config: RalphConfig, sandbox: str) -> Back
     if sandbox == "docker":
         return SandboxBackend(backend, config.get_auth(cfg.engine), config.workspace_dir)
     return backend
+
+
+def _with_dynamic_codex_reasoning(
+    backend: BackendConfig,
+    *,
+    step: str,
+    task_retries: int,
+) -> list[str]:
+    """Return backend flags with dynamic Codex reasoning effort per step and retry count."""
+    effective_flags = _strip_codex_reasoning_override(backend.extra_flags)
+    if backend.engine != "codex":
+        return effective_flags
+
+    reasoning_effort = "xhigh" if step == "code" and task_retries > 0 else "high"
+    effective_flags.append(f'--config=model_reasoning_effort="{reasoning_effort}"')
+    return effective_flags
+
+
+def _strip_codex_reasoning_override(extra_flags: list[str]) -> list[str]:
+    """Drop user-defined model_reasoning_effort overrides from extra flags."""
+    cleaned: list[str] = []
+    index = 0
+    while index < len(extra_flags):
+        flag = extra_flags[index]
+        if flag in {"-c", "--config"}:
+            if index + 1 < len(extra_flags):
+                candidate = extra_flags[index + 1].strip()
+                if candidate.startswith("model_reasoning_effort="):
+                    index += 2
+                    continue
+            cleaned.append(flag)
+            index += 1
+            continue
+
+        if flag.startswith("--config="):
+            candidate = flag.split("=", 1)[1].strip()
+            if candidate.startswith("model_reasoning_effort="):
+                index += 1
+                continue
+
+        cleaned.append(flag)
+        index += 1
+
+    return cleaned
 
 
 def _render_coder_prompt(

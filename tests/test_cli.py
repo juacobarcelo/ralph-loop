@@ -894,6 +894,210 @@ def test_next_action_and_update_flow(sample_workspace: Path, monkeypatch) -> Non
     assert updated.phases[0].tasks[0].status.value == "completed"
 
 
+def test_strip_codex_reasoning_override_handles_both_config_forms() -> None:
+    cleaned = cli_module._strip_codex_reasoning_override(
+        [
+            "--search",
+            '--config=model_reasoning_effort="low"',
+            "-c",
+            'model_reasoning_effort="medium"',
+            "-c",
+            "features.foo=true",
+        ]
+    )
+    assert cleaned == ["--search", "-c", "features.foo=true"]
+
+
+def test_next_action_code_uses_high_reasoning_on_first_attempt(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["backends"]["coder"]["extra_flags"] = [
+        "--search",
+        '--config=model_reasoning_effort="low"',
+    ]
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["next-action", "--config", str(config_path)])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["command"] == "code"
+    assert payload["extra_flags"] == [
+        "--search",
+        '--config=model_reasoning_effort="high"',
+    ]
+
+
+def test_next_action_code_uses_xhigh_reasoning_on_retry(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    progress_path = sample_workspace / "PROGRESS.yaml"
+    progress = load_progress(str(progress_path))
+    progress.phases[0].tasks[0].status = TaskStatus.FAILED
+    progress.phases[0].tasks[0].retries = 1
+    save_progress(progress, str(progress_path))
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["next-action", "--config", str(config_path)])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["command"] == "code"
+    assert payload["extra_flags"] == ['--config=model_reasoning_effort="xhigh"']
+
+
+def test_next_action_inspect_uses_high_reasoning_when_engine_is_codex(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    progress_path = sample_workspace / "PROGRESS.yaml"
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["backends"]["inspector"] = {
+        "engine": "codex",
+        "model": "gpt-5.3-codex",
+        "timeout_seconds": 300,
+        "extra_flags": ["--search"],
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    progress = load_progress(str(progress_path))
+    progress.phases[0].tasks[0].verify_commands = []
+    save_progress(progress, str(progress_path))
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    runner = CliRunner()
+    first = runner.invoke(main, ["next-action", "--config", str(config_path)])
+    assert first.exit_code == 0
+    assert json.loads(first.output)["command"] == "code"
+
+    step_result = tmp_dir / "step-result.json"
+    step_result.write_text(
+        json.dumps({"step": "code", "task_id": "01", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    second = runner.invoke(
+        main,
+        [
+            "next-action",
+            "--config",
+            str(config_path),
+            "--step-result",
+            str(step_result),
+        ],
+    )
+    assert second.exit_code == 0
+    payload = json.loads(second.output)
+    assert payload["command"] == "inspect"
+    assert payload["extra_flags"] == [
+        "--search",
+        '--config=model_reasoning_effort="high"',
+    ]
+
+
+def test_next_action_visual_uses_high_reasoning_when_engine_is_codex(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    progress_path = sample_workspace / "PROGRESS.yaml"
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["backends"]["visual"] = {
+        "engine": "codex",
+        "model": "gpt-5.3-codex",
+        "timeout_seconds": 300,
+        "extra_flags": ["--search"],
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    progress = load_progress(str(progress_path))
+    progress.phases[0].tasks[0].verify_commands = []
+    progress.phases[0].tasks[0].visual_verify = VisualVerifyConfig.model_validate(
+        {
+            "type": "screenshot",
+            "url": "http://localhost:3000",
+            "reference": "references/home.png",
+            "assertion": "Layout should match",
+            "viewport_width": 1280,
+            "viewport_height": 720,
+        }
+    )
+    save_progress(progress, str(progress_path))
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    runner = CliRunner()
+    first = runner.invoke(main, ["next-action", "--config", str(config_path)])
+    assert first.exit_code == 0
+    assert json.loads(first.output)["command"] == "code"
+
+    step_result = tmp_dir / "step-result.json"
+    step_result.write_text(
+        json.dumps({"step": "code", "task_id": "01", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    second = runner.invoke(
+        main,
+        [
+            "next-action",
+            "--config",
+            str(config_path),
+            "--step-result",
+            str(step_result),
+        ],
+    )
+    assert second.exit_code == 0
+    payload = json.loads(second.output)
+    assert payload["command"] == "visual"
+    assert payload["extra_flags"] == [
+        "--search",
+        '--config=model_reasoning_effort="high"',
+    ]
+
+
 def test_execute_command_uses_available_backend(tmp_path: Path, monkeypatch) -> None:
     prompt_path = tmp_path / "coder-prompt.md"
     prompt_path.write_text("implement", encoding="utf-8")

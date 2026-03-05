@@ -25,6 +25,7 @@ def run_verification_pipeline(
     task_progress: TaskProgress,
     config: RalphConfig,
     inspector_backend: Backend,
+    inspector_backend_config: BackendConfig | None = None,
     verify_commands: list[str],
     visual_backend: Backend | None = None,
     visual_backend_config: BackendConfig | None = None,
@@ -57,7 +58,7 @@ def run_verification_pipeline(
     else:
         effective_visual_config = config.get_backend("inspector")
 
-    inspector_config = config.get_backend("inspector")
+    inspector_config = inspector_backend_config or config.get_backend("inspector")
 
     visual_result = run_visual_verification(
         config=task_progress.visual_verify or task.frontmatter.visual_verify,

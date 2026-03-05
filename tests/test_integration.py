@@ -238,6 +238,141 @@ def test_run_loop_recovers_orphan_in_progress_task(monkeypatch, tmp_path: Path) 
     assert task_01.status.value == "completed"
 
 
+def test_run_loop_applies_dynamic_codex_reasoning_flags(monkeypatch, tmp_path: Path) -> None:
+    workspace = tmp_path
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    _write_task(tasks_dir / "01-task.md", "Task 01", "verify-01")
+
+    progress_path = workspace / "PROGRESS.yaml"
+    progress_path.write_text(
+        yaml.safe_dump(
+            {
+                "meta": {"title": "Integration", "started": "2026-03-01", "current_phase": 1},
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "status": "not_started",
+                        "tasks": [
+                            {
+                                "id": "01",
+                                "title": "Task 01",
+                                "task_file": str(tasks_dir / "01-task.md"),
+                                "status": "not_started",
+                                "retries": 0,
+                                "verify_commands": [],
+                                "visual_verify": None,
+                                "feedback": [],
+                            }
+                        ],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = RalphConfig.model_validate(
+        {
+            "workspace_dir": str(workspace),
+            "progress_file": str(progress_path),
+            "task_dir": str(tasks_dir),
+            "max_retries": 3,
+            "pause_file": str(workspace / "PAUSE.md"),
+            "backends": {
+                "coder": {
+                    "engine": "codex",
+                    "timeout_seconds": 60,
+                    "extra_flags": [
+                        "--search",
+                        '--config=model_reasoning_effort="low"',
+                    ],
+                },
+                "inspector": {
+                    "engine": "codex",
+                    "timeout_seconds": 60,
+                    "extra_flags": [
+                        "--search",
+                        "-c",
+                        'model_reasoning_effort="low"',
+                    ],
+                },
+                "visual": {
+                    "engine": "codex",
+                    "timeout_seconds": 60,
+                    "extra_flags": ["--search"],
+                },
+            },
+            "verify_commands": [],
+        }
+    )
+
+    call_history: dict[str, list[list[str]]] = {
+        "coder_flags": [],
+        "inspector_flags": [],
+        "visual_flags": [],
+    }
+
+    class _Backend:
+        def __init__(self, engine: str) -> None:
+            self.engine = engine
+
+        @property
+        def name(self) -> str:
+            return self.engine
+
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, cwd
+            call_history["coder_flags"].append(list(extra_flags or []))
+            return SimpleNamespace(exit_code=0, stdout="coded", stderr="", timed_out=False)
+
+        def is_available(self) -> bool:
+            return True
+
+    monkeypatch.setattr("ralph_loop.loop.get_backend", lambda engine: _Backend(engine))
+
+    attempt = {"count": 0}
+
+    def _fake_pipeline(
+        *,
+        task,
+        task_progress,
+        config,
+        inspector_backend,
+        inspector_backend_config,
+        verify_commands,
+        visual_backend,
+        visual_backend_config,
+    ):
+        _ = task, task_progress, config, inspector_backend, verify_commands, visual_backend
+        call_history["inspector_flags"].append(list(inspector_backend_config.extra_flags))
+        call_history["visual_flags"].append(list(visual_backend_config.extra_flags))
+        attempt["count"] += 1
+        if attempt["count"] == 1:
+            return SimpleNamespace(all_passed=False, feedback_sources=[])
+        return SimpleNamespace(all_passed=True, feedback_sources=[])
+
+    monkeypatch.setattr("ralph_loop.loop.run_verification_pipeline", _fake_pipeline)
+
+    exit_code = run_loop(config, sandbox="none")
+    assert exit_code == 0
+
+    assert call_history["coder_flags"] == [
+        ["--search", '--config=model_reasoning_effort="high"'],
+        ["--search", '--config=model_reasoning_effort="xhigh"'],
+    ]
+    assert call_history["inspector_flags"] == [
+        ["--search", '--config=model_reasoning_effort="high"'],
+        ["--search", '--config=model_reasoning_effort="high"'],
+    ]
+    assert call_history["visual_flags"] == [
+        ["--search", '--config=model_reasoning_effort="high"'],
+        ["--search", '--config=model_reasoning_effort="high"'],
+    ]
+
+
 def _write_task(path: Path, title: str, verify_command: str) -> None:
     path.write_text(
         f"""---

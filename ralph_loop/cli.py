@@ -339,18 +339,22 @@ def _build_inspector_prompt(task: Any, verification_results: list[dict[str, Any]
     else:
         lines.append("1. Validate task completion.")
 
-    lines.extend([
-        "",
-        "Review task result and return strict JSON:",
-        "",
-        "Hard rules:",
-        "- If any deterministic verification failed, verdict MUST be `fail`.",
-    ])
+    lines.extend(
+        [
+            "",
+            "Review task result and return strict JSON:",
+            "",
+            "Hard rules:",
+            "- If any deterministic verification failed, verdict MUST be `fail`.",
+        ]
+    )
     if visual_verify is not None:
         lines.append("- If visual verification failed or could not run, verdict MUST be `fail`.")
-    lines.extend([
-        "- Return `pass` only when all acceptance checks are green.",
-    ])
+    lines.extend(
+        [
+            "- Return `pass` only when all acceptance checks are green.",
+        ]
+    )
     lines.append('{"verdict":"pass|fail","feedback":"..."}')
     if verification_results:
         lines.extend(["", "## Verification results", json.dumps(verification_results, indent=2)])
@@ -420,6 +424,50 @@ def _collect_verification_results(iteration: dict[str, Any]) -> list[dict[str, A
 
 def _visual_backend_role(config: RalphConfig) -> str:
     return "visual" if "visual" in config.backends else "inspector"
+
+
+def _with_dynamic_codex_reasoning(
+    backend: BackendConfig,
+    *,
+    step: str,
+    task_retries: int,
+) -> list[str]:
+    """Return backend flags with dynamic Codex reasoning effort per step and retry count."""
+    effective_flags = _strip_codex_reasoning_override(backend.extra_flags)
+    if backend.engine != "codex":
+        return effective_flags
+
+    reasoning_effort = "xhigh" if step == "code" and task_retries > 0 else "high"
+    effective_flags.append(f'--config=model_reasoning_effort="{reasoning_effort}"')
+    return effective_flags
+
+
+def _strip_codex_reasoning_override(extra_flags: list[str]) -> list[str]:
+    """Drop user-defined model_reasoning_effort overrides from extra flags."""
+    cleaned: list[str] = []
+    index = 0
+    while index < len(extra_flags):
+        flag = extra_flags[index]
+        if flag in {"-c", "--config"}:
+            if index + 1 < len(extra_flags):
+                candidate = extra_flags[index + 1].strip()
+                if candidate.startswith("model_reasoning_effort="):
+                    index += 2
+                    continue
+            cleaned.append(flag)
+            index += 1
+            continue
+
+        if flag.startswith("--config="):
+            candidate = flag.split("=", 1)[1].strip()
+            if candidate.startswith("model_reasoning_effort="):
+                index += 1
+                continue
+
+        cleaned.append(flag)
+        index += 1
+
+    return cleaned
 
 
 def _select_available_backend() -> tuple[str, Any]:
@@ -1262,6 +1310,11 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
             if visual_config is not None:
                 visual_role = _visual_backend_role(config)
                 visual = config.get_backend(visual_role)
+                visual_flags = _with_dynamic_codex_reasoning(
+                    visual,
+                    step="visual",
+                    task_retries=task.retries,
+                )
                 iteration["current_step"] = "visual"
                 _save_iteration_state(paths.iteration_path, iteration)
                 click.echo(
@@ -1272,7 +1325,7 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                             "image": f"ralph-loop-{visual.engine}",
                             "model": visual.model,
                             "timeout_seconds": visual.timeout_seconds,
-                            "extra_flags": visual.extra_flags,
+                            "extra_flags": visual_flags,
                             "setup_commands": visual_config.setup_commands,
                             "teardown_commands": visual_config.teardown_commands,
                             "workspace_dir": config.workspace_dir,
@@ -1285,6 +1338,11 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
             inspector_prompt = _build_inspector_prompt(_task_for_inspector(task, config), None)
             paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
             inspector = config.get_backend("inspector")
+            inspector_flags = _with_dynamic_codex_reasoning(
+                inspector,
+                step="inspect",
+                task_retries=task.retries,
+            )
             iteration["current_step"] = "inspect"
             _save_iteration_state(paths.iteration_path, iteration)
             click.echo(
@@ -1296,7 +1354,7 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                         "prompt_file": str(paths.inspector_prompt_path),
                         "model": inspector.model,
                         "timeout_seconds": inspector.timeout_seconds,
-                        "extra_flags": inspector.extra_flags,
+                        "extra_flags": inspector_flags,
                         "auth": config.get_auth(inspector.engine).model_dump(),
                     }
                 )
@@ -1308,6 +1366,11 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
             if visual_config is not None:
                 visual_role = _visual_backend_role(config)
                 visual = config.get_backend(visual_role)
+                visual_flags = _with_dynamic_codex_reasoning(
+                    visual,
+                    step="visual",
+                    task_retries=task.retries,
+                )
                 iteration["current_step"] = "visual"
                 _save_iteration_state(paths.iteration_path, iteration)
                 click.echo(
@@ -1318,7 +1381,7 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                             "image": f"ralph-loop-{visual.engine}",
                             "model": visual.model,
                             "timeout_seconds": visual.timeout_seconds,
-                            "extra_flags": visual.extra_flags,
+                            "extra_flags": visual_flags,
                             "setup_commands": visual_config.setup_commands,
                             "teardown_commands": visual_config.teardown_commands,
                             "workspace_dir": config.workspace_dir,
@@ -1334,6 +1397,11 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
             )
             paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
             inspector = config.get_backend("inspector")
+            inspector_flags = _with_dynamic_codex_reasoning(
+                inspector,
+                step="inspect",
+                task_retries=task.retries,
+            )
             iteration["current_step"] = "inspect"
             _save_iteration_state(paths.iteration_path, iteration)
             click.echo(
@@ -1345,7 +1413,7 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                         "prompt_file": str(paths.inspector_prompt_path),
                         "model": inspector.model,
                         "timeout_seconds": inspector.timeout_seconds,
-                        "extra_flags": inspector.extra_flags,
+                        "extra_flags": inspector_flags,
                         "auth": config.get_auth(inspector.engine).model_dump(),
                     }
                 )
@@ -1359,6 +1427,11 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
             )
             paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
             inspector = config.get_backend("inspector")
+            inspector_flags = _with_dynamic_codex_reasoning(
+                inspector,
+                step="inspect",
+                task_retries=task.retries,
+            )
             iteration["current_step"] = "inspect"
             _save_iteration_state(paths.iteration_path, iteration)
             click.echo(
@@ -1370,7 +1443,7 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                         "prompt_file": str(paths.inspector_prompt_path),
                         "model": inspector.model,
                         "timeout_seconds": inspector.timeout_seconds,
-                        "extra_flags": inspector.extra_flags,
+                        "extra_flags": inspector_flags,
                         "auth": config.get_auth(inspector.engine).model_dump(),
                     }
                 )
@@ -1435,6 +1508,11 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
     _save_iteration_state(paths.iteration_path, iteration)
 
     coder = config.get_backend("coder")
+    coder_flags = _with_dynamic_codex_reasoning(
+        coder,
+        step="code",
+        task_retries=next_task.retries,
+    )
     click.echo(
         json.dumps(
             {
@@ -1444,7 +1522,7 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                 "prompt_file": str(paths.coder_prompt_path),
                 "model": coder.model,
                 "timeout_seconds": coder.timeout_seconds,
-                "extra_flags": coder.extra_flags,
+                "extra_flags": coder_flags,
                 "auth": config.get_auth(coder.engine).model_dump(),
             }
         )
@@ -1782,12 +1860,14 @@ def init_command(
     os.environ["RALPH_COPILOT_STREAM_OUTPUT"] = "1"
     try:
         for attempt in range(1, attempts + 1):
-            candidate_plan, generation_error, generation_result, prompt_used = _generate_plan_with_backend(
-                config=config,
-                prompt=prompt,
-                backend_override=backend,
-                model_override=model,
-                validation_feedback=validation_feedback,
+            candidate_plan, generation_error, generation_result, prompt_used = (
+                _generate_plan_with_backend(
+                    config=config,
+                    prompt=prompt,
+                    backend_override=backend,
+                    model_override=model,
+                    validation_feedback=validation_feedback,
+                )
             )
             prompt_path, stdout_path, stderr_path = _write_init_attempt_artifacts(
                 tmp_dir=runtime_paths.tmp_dir,
@@ -1843,8 +1923,7 @@ def init_command(
     if generated_plan is None:
         final_error = validation_feedback or "Unknown generation error"
         raise click.ClickException(
-            "AI generation unavailable or invalid backend output after 3 attempts.\n"
-            f"{final_error}"
+            f"AI generation unavailable or invalid backend output after 3 attempts.\n{final_error}"
         )
 
     click.echo("[init] AI generation completed.")

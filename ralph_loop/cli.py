@@ -188,9 +188,12 @@ def _build_inspector_prompt(task: Any, verification_results: list[dict[str, Any]
         "",
         "Hard rules:",
         "- If any deterministic verification failed, verdict MUST be `fail`.",
-        "- If visual verification failed or could not run, verdict MUST be `fail`.",
-        "- Return `pass` only when all acceptance checks are green.",
     ]
+    if task.visual_verify is not None:
+        lines.append("- If visual verification failed or could not run, verdict MUST be `fail`.")
+    lines.extend([
+        "- Return `pass` only when all acceptance checks are green.",
+    ])
     lines.append('{"verdict":"pass|fail","feedback":"..."}')
     if verification_results:
         lines.extend(["", "## Verification results", json.dumps(verification_results, indent=2)])

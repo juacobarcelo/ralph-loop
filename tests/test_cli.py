@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from click.testing import CliRunner
+import pytest
 import yaml
 
 from ralph_loop import cli as cli_module
@@ -712,6 +713,124 @@ def test_init_creates_target_directories_when_missing(sample_workspace: Path, mo
     assert progress_file.exists()
 
 
+def test_init_ensures_unified_config_defaults(sample_workspace: Path, monkeypatch) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload.pop("review_mode", None)
+    payload["backends"].pop("reviewer", None)
+    payload.pop("runtime_guards", None)
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    class _FakeBackend:
+        def is_available(self) -> bool:
+            return True
+
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Setup Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [{"id": "01", "title": "Setup project"}],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
+
+    plan_path = sample_workspace / "plan-unified-defaults.md"
+    plan_path.write_text("# Plan\n- [ ] Setup project", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert result.exit_code == 0
+
+    updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert updated["review_mode"] == "unified_agent"
+    assert "reviewer" in updated["backends"]
+    assert updated["backends"]["reviewer"]["engine"] == updated["backends"]["inspector"]["engine"]
+    assert updated["runtime_guards"]["pre_code"]["command"] == "./scripts/ralph/guard.sh"
+    assert updated["runtime_guards"]["pre_code"]["on_failure"] == "pause_loop"
+    assert updated["runtime_guards"]["post_code"]["on_failure"] == "fail_attempt"
+
+
+def test_init_creates_guard_script_and_verify_file_in_workspace(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    script_path = sample_workspace / "scripts" / "ralph" / "guard.sh"
+    verify_file = sample_workspace / "scripts" / "ralph" / "verify-commands.txt"
+    assert not script_path.exists()
+    assert not verify_file.exists()
+
+    class _FakeBackend:
+        def is_available(self) -> bool:
+            return True
+
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Setup Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [{"id": "01", "title": "Setup project"}],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
+
+    plan_path = sample_workspace / "plan-guard.md"
+    plan_path.write_text("# Plan\n- [ ] Setup project", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--config",
+            str(sample_workspace / "ralph-config.yaml"),
+        ],
+    )
+    assert result.exit_code == 0
+    assert script_path.exists()
+    assert verify_file.exists()
+    assert (script_path.stat().st_mode & 0o111) != 0
+    content = script_path.read_text(encoding="utf-8")
+    assert "docker compose up -d" in content
+    assert "run_verify_checks" in content
+    verify_content = verify_file.read_text(encoding="utf-8")
+    assert "pnpm exec tsc --noEmit" in verify_content
+
+
 def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True)
@@ -775,10 +894,11 @@ def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, mon
     )
 
     assert result.exit_code == 0
-    loop_dir = workspace / ".ralph-loop" / "my-feature-plan"
+    loop_dir = workspace / ".ralph-loop"
     assert (loop_dir / "tasks" / "01-setup-project.json").exists()
     assert (loop_dir / "PROGRESS.yaml").exists()
     assert (loop_dir / "product").exists()
+    assert (loop_dir / "product" / "scripts" / "ralph" / "guard.sh").exists()
 
 
 def test_next_action_and_update_flow(sample_workspace: Path, monkeypatch) -> None:
@@ -1271,6 +1391,224 @@ def test_build_coder_prompt_uses_fallback_task_resolution(sample_workspace: Path
     assert prompt.strip() == "# task"
 
 
+def test_build_coder_prompt_includes_task_capability_instructions(sample_workspace: Path) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["agent_capabilities"] = {
+        "playwright": {
+            "type": "builtin",
+            "instruction": "You can run Playwright checks for UI validation.",
+        }
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    task_file = sample_workspace / "tasks" / "01-capabilities.json"
+    task_file.write_text(
+        json.dumps(
+            {
+                "id": "01",
+                "title": "Capability prompt test",
+                "phase": 1,
+                "coding": {
+                    "description": "Validate capability instructions in coder prompt.",
+                    "acceptance_criteria": ["Prompt includes capability guidance."],
+                    "files_to_touch": [],
+                    "files_not_to_touch": [],
+                    "constraints": [],
+                    "reference_impl": None,
+                },
+                "verify": {"commands": []},
+                "inspect": {
+                    "acceptance_criteria": [],
+                    "description_summary": "Capability prompt test",
+                },
+                "agent_capabilities": {"code": ["playwright"], "review": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    progress.phases[0].tasks[0].task_file = str(task_file)
+    save_progress(progress, str(sample_workspace / "PROGRESS.yaml"))
+
+    config = RalphConfig.load(str(config_path))
+    task = load_progress(str(sample_workspace / "PROGRESS.yaml")).phases[0].tasks[0]
+    prompt = cli_module._build_coder_prompt(task, config)
+
+    assert "## Available Capabilities" in prompt
+    assert "`playwright` (builtin)" in prompt
+    assert "Playwright checks for UI validation" in prompt
+
+
+def test_emit_code_action_includes_capability_flags(sample_workspace: Path) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["agent_capabilities"] = {
+        "chrome-devtools": {
+            "type": "mcp",
+            "instruction": "Use Chrome MCP when browser inspection is required.",
+            "backend_flags": {
+                "codex": {"code": ["--config", "mcp_servers.chrome-devtools=enabled"]}
+            },
+        }
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    task_file = sample_workspace / "tasks" / "01-capabilities.json"
+    task_file.write_text(
+        json.dumps(
+            {
+                "id": "01",
+                "title": "Code action capabilities",
+                "phase": 1,
+                "coding": {
+                    "description": "Ensure capability flags are propagated for code.",
+                    "acceptance_criteria": ["Code action includes capability flags."],
+                    "files_to_touch": [],
+                    "files_not_to_touch": [],
+                    "constraints": [],
+                    "reference_impl": None,
+                },
+                "verify": {"commands": []},
+                "inspect": {"acceptance_criteria": [], "description_summary": "Code action"},
+                "agent_capabilities": {"code": ["chrome-devtools"], "review": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    progress.phases[0].tasks[0].task_file = str(task_file)
+    save_progress(progress, str(sample_workspace / "PROGRESS.yaml"))
+
+    config = RalphConfig.load(str(config_path))
+    task = load_progress(str(sample_workspace / "PROGRESS.yaml")).phases[0].tasks[0]
+    paths = cli_module._runtime_paths(config)
+    paths.tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    action = cli_module._emit_code_action(task=task, config=config, paths=paths)
+
+    assert action["command"] == "code"
+    assert action["capabilities"] == ["chrome-devtools"]
+    assert "--config" in action["extra_flags"]
+    assert "mcp_servers.chrome-devtools=enabled" in action["extra_flags"]
+    assert '--config=model_reasoning_effort="high"' in action["extra_flags"]
+
+
+def test_emit_review_action_includes_capability_flags_and_prompt_context(
+    sample_workspace: Path,
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["review_mode"] = "unified_agent"
+    config_payload["backends"]["reviewer"] = {
+        "engine": "codex",
+        "model": "gpt-5.4-codex",
+        "timeout_seconds": 300,
+    }
+    config_payload["agent_capabilities"] = {
+        "chrome-devtools": {
+            "type": "mcp",
+            "instruction": "Use Chrome MCP to inspect UI state when acceptance requires it.",
+            "backend_flags": {
+                "codex": {"review": ["--config", "mcp_servers.chrome-devtools=enabled"]}
+            },
+        }
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    task_file = sample_workspace / "tasks" / "01-capabilities.json"
+    task_file.write_text(
+        json.dumps(
+            {
+                "id": "01",
+                "title": "Review action capabilities",
+                "phase": 1,
+                "coding": {
+                    "description": "Ensure reviewer capability setup is propagated.",
+                    "acceptance_criteria": ["Review action includes capability flags."],
+                    "files_to_touch": [],
+                    "files_not_to_touch": [],
+                    "constraints": [],
+                    "reference_impl": None,
+                },
+                "verify": {"commands": []},
+                "inspect": {
+                    "acceptance_criteria": ["Review action includes capability flags."],
+                    "description_summary": "Review action capabilities",
+                },
+                "agent_capabilities": {"code": [], "review": ["chrome-devtools"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    progress.phases[0].tasks[0].task_file = str(task_file)
+    save_progress(progress, str(sample_workspace / "PROGRESS.yaml"))
+
+    config = RalphConfig.load(str(config_path))
+    task = load_progress(str(sample_workspace / "PROGRESS.yaml")).phases[0].tasks[0]
+    paths = cli_module._runtime_paths(config)
+    paths.tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    action = cli_module._emit_review_action(
+        task=task,
+        config=config,
+        paths=paths,
+        iteration={"task_id": "01", "results": []},
+    )
+
+    prompt = paths.reviewer_prompt_path.read_text(encoding="utf-8")
+    assert "## Available Capabilities" in prompt
+    assert "`chrome-devtools` (mcp)" in prompt
+    assert action["command"] == "review"
+    assert action["capabilities"] == ["chrome-devtools"]
+    assert "--config" in action["extra_flags"]
+    assert "mcp_servers.chrome-devtools=enabled" in action["extra_flags"]
+
+
+def test_emit_code_action_fails_when_task_references_unknown_capability(
+    sample_workspace: Path,
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    task_file = sample_workspace / "tasks" / "01-capabilities.json"
+    task_file.write_text(
+        json.dumps(
+            {
+                "id": "01",
+                "title": "Unknown capability",
+                "phase": 1,
+                "coding": {
+                    "description": "Task references capability missing from config.",
+                    "acceptance_criteria": ["Should fail early."],
+                    "files_to_touch": [],
+                    "files_not_to_touch": [],
+                    "constraints": [],
+                    "reference_impl": None,
+                },
+                "verify": {"commands": []},
+                "inspect": {"acceptance_criteria": [], "description_summary": "Unknown capability"},
+                "agent_capabilities": {"code": ["missing-capability"], "review": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    progress.phases[0].tasks[0].task_file = str(task_file)
+    save_progress(progress, str(sample_workspace / "PROGRESS.yaml"))
+
+    config = RalphConfig.load(str(config_path))
+    task = load_progress(str(sample_workspace / "PROGRESS.yaml")).phases[0].tasks[0]
+    paths = cli_module._runtime_paths(config)
+    paths.tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(Exception):
+        cli_module._emit_code_action(task=task, config=config, paths=paths)
+
+
 def test_next_action_includes_visual_step(sample_workspace: Path, monkeypatch) -> None:
     config_path = sample_workspace / "ralph-config.yaml"
     progress_path = sample_workspace / "PROGRESS.yaml"
@@ -1411,6 +1749,124 @@ def test_next_action_visual_includes_setup_teardown_commands(
     assert second_payload["setup_commands"] == ["docker compose up -d myservice", "sleep 3"]
     assert second_payload["teardown_commands"] == ["docker compose stop myservice"]
     assert "workspace_dir" in second_payload
+
+
+def test_next_action_unified_starts_with_runtime_pre_code(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["review_mode"] = "unified_agent"
+    payload["runtime_guards"] = {
+        "pre_code": {
+            "command": "./scripts/ralph/guard.sh",
+            "timeout_seconds": 120,
+            "on_failure": "pause_loop",
+        }
+    }
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["next-action", "--config", str(config_path)])
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    assert output["command"] == "runtime"
+    assert output["phase"] == "pre_code"
+    assert output["runtime_command"] == "./scripts/ralph/guard.sh"
+    assert output["timeout_seconds"] == 120
+
+
+def test_next_action_unified_transitions_runtime_code_runtime_review(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["review_mode"] = "unified_agent"
+    payload["backends"]["reviewer"] = {
+        "engine": "codex",
+        "model": "gpt-5.4-codex",
+        "timeout_seconds": 300,
+    }
+    payload["runtime_guards"] = {
+        "pre_code": {
+            "command": "./scripts/ralph/guard.sh",
+            "timeout_seconds": 120,
+            "on_failure": "pause_loop",
+        },
+        "post_code": {
+            "command": "./scripts/ralph/guard.sh",
+            "timeout_seconds": 120,
+            "on_failure": "fail_attempt",
+        },
+    }
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+
+    runner = CliRunner()
+    first = runner.invoke(main, ["next-action", "--config", str(config_path)])
+    assert first.exit_code == 0
+    assert json.loads(first.output)["command"] == "runtime"
+
+    step_result = tmp_dir / "step-result.json"
+    step_result.write_text(
+        json.dumps({"step": "runtime_pre_code", "task_id": "01", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    second = runner.invoke(
+        main,
+        ["next-action", "--config", str(config_path), "--step-result", str(step_result)],
+    )
+    assert second.exit_code == 0
+    assert json.loads(second.output)["command"] == "code"
+
+    step_result.write_text(
+        json.dumps({"step": "code", "task_id": "01", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    third = runner.invoke(
+        main,
+        ["next-action", "--config", str(config_path), "--step-result", str(step_result)],
+    )
+    assert third.exit_code == 0
+    third_payload = json.loads(third.output)
+    assert third_payload["command"] == "runtime"
+    assert third_payload["phase"] == "post_code"
+
+    step_result.write_text(
+        json.dumps({"step": "runtime_post_code", "task_id": "01", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    fourth = runner.invoke(
+        main,
+        ["next-action", "--config", str(config_path), "--step-result", str(step_result)],
+    )
+    assert fourth.exit_code == 0
+    fourth_payload = json.loads(fourth.output)
+    assert fourth_payload["command"] == "review"
+    assert "prompt_file" in fourth_payload
+    assert fourth_payload["image"] == "ralph-loop-codex"
 
 
 def test_next_action_returns_abort_when_any_task_is_aborted(
@@ -1594,6 +2050,62 @@ def test_update_command_fails_when_visual_result_is_missing(sample_workspace: Pa
     )
 
 
+def test_update_command_unified_fails_on_runtime_post_without_missing_review(
+    sample_workspace: Path,
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["review_mode"] = "unified_agent"
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+    config = RalphConfig.load(str(config_path))
+
+    paths = sample_workspace / ".ralph-tmp"
+    paths.mkdir(exist_ok=True)
+    progress = load_progress(config.progress_file)
+    progress.phases[0].tasks[0].status = TaskStatus.IN_PROGRESS
+    save_progress(progress, config.progress_file)
+
+    iteration = {
+        "task_id": "01",
+        "current_step": "update",
+        "started_at": "2026-03-01T00:00:00Z",
+        "task_base_sha": "abc123",
+        "runtime_pre_ok": True,
+        "results": [
+            {"step": "runtime_pre_code", "task_id": "01", "exit_code": 0},
+            {"step": "code", "task_id": "01", "exit_code": 0},
+            {
+                "step": "runtime_post_code",
+                "task_id": "01",
+                "exit_code": 1,
+                "runtime_command": "./scripts/ralph/guard.sh",
+                "stdout": "",
+                "stderr": "service unavailable",
+            },
+        ],
+    }
+    (sample_workspace / ".ralph-tmp" / "iteration-state.json").write_text(
+        json.dumps(iteration),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["update", "--config", str(config_path), "--result-dir", str(paths)],
+    )
+    assert result.exit_code == 0
+
+    progress = load_progress(config.progress_file)
+    task = progress.phases[0].tasks[0]
+    assert task.status.value == "failed"
+    assert any(source.type == "runtime_guard" for source in task.feedback[-1].sources)
+    assert not any(
+        source.type == "review" and source.details == "Review result missing for this attempt."
+        for source in task.feedback[-1].sources
+    )
+
+
 def test_build_inspector_prompt_includes_failure_gates() -> None:
     class _Task:
         id = "01"
@@ -1632,6 +2144,19 @@ def test_run_command_returns_loop_exit_code(sample_workspace: Path, monkeypatch)
     result = runner.invoke(main, ["run", "--config", str(config_path), "--sandbox", "none"])
 
     assert result.exit_code == 1
+
+
+def test_run_command_rejects_unified_review_mode(sample_workspace: Path) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["review_mode"] = "unified_agent"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "--config", str(config_path), "--sandbox", "none"])
+
+    assert result.exit_code != 0
+    assert "does not support `review_mode=unified_agent`" in result.output
 
 
 # ---------------------------------------------------------------------------

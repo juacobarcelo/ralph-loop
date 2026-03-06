@@ -18,9 +18,11 @@ from pydantic import BaseModel, Field, ValidationError
 from ralph_loop.backends import get_backend
 from ralph_loop.backends.base import ExecutionResult
 from ralph_loop.config import (
+    AgentCapabilityConfig,
     BackendConfig,
     ConfigNotFoundError,
     RalphConfig,
+    RuntimeGuardConfig,
     VisualVerifyConfig,
     resolve_config_path,
 )
@@ -84,9 +86,24 @@ class GeneratedTask(BaseModel):
     files_not_to_touch: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     reference_impl: str | None = None
+    agent_capabilities: dict[str, list[str]] = Field(default_factory=dict)
 
     def to_task_json(self, *, phase_id: int, task_id: str) -> TaskJson:
         summary_source = (self.description or self.title).strip()
+        code_capabilities: list[str] = []
+        review_capabilities: list[str] = []
+        if isinstance(self.agent_capabilities, dict):
+            raw_code = self.agent_capabilities.get("code")
+            if isinstance(raw_code, list):
+                code_capabilities = [
+                    item.strip() for item in raw_code if isinstance(item, str) and item.strip()
+                ]
+            raw_review = self.agent_capabilities.get("review")
+            if isinstance(raw_review, list):
+                review_capabilities = [
+                    item.strip() for item in raw_review if isinstance(item, str) and item.strip()
+                ]
+
         return TaskJson.model_validate(
             {
                 "id": task_id,
@@ -120,6 +137,10 @@ class GeneratedTask(BaseModel):
                     "acceptance_criteria": self.acceptance_criteria,
                     "description_summary": summary_source[:200],
                 },
+                "agent_capabilities": {
+                    "code": code_capabilities,
+                    "review": review_capabilities,
+                },
             }
         )
 
@@ -151,6 +172,7 @@ class _Paths:
     iteration_path: Path
     coder_prompt_path: Path
     inspector_prompt_path: Path
+    reviewer_prompt_path: Path
 
 
 def _runtime_paths(config: RalphConfig) -> _Paths:
@@ -161,6 +183,7 @@ def _runtime_paths(config: RalphConfig) -> _Paths:
         iteration_path=tmp_dir / "iteration-state.json",
         coder_prompt_path=tmp_dir / "coder-prompt.md",
         inspector_prompt_path=tmp_dir / "inspector-prompt.md",
+        reviewer_prompt_path=tmp_dir / "reviewer-prompt.md",
     )
 
 
@@ -187,6 +210,18 @@ def _clear_iteration_state(iteration_path: Path) -> None:
         iteration_path.unlink()
 
 
+def _load_optional_file(path_value: str | None) -> str | None:
+    if not path_value:
+        return None
+    candidate = Path(path_value).expanduser()
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    try:
+        return candidate.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def _extract_step_result(step_result_path: str | None) -> dict[str, Any] | None:
     if not step_result_path:
         return None
@@ -194,6 +229,10 @@ def _extract_step_result(step_result_path: str | None) -> dict[str, Any] | None:
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        path.unlink()
+    except OSError:
+        pass
     if not isinstance(data, dict):
         return None
     return data
@@ -248,6 +287,128 @@ def _task_for_inspector(task_progress: Any, config: RalphConfig) -> Any:
     return task_progress
 
 
+@dataclass
+class _ResolvedCapability:
+    capability_id: str
+    capability: AgentCapabilityConfig
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _task_capability_ids(task_doc: Task | TaskJson | None, *, step: str) -> list[str]:
+    if not isinstance(task_doc, TaskJson):
+        return []
+    if step == "code":
+        return _dedupe_strings(task_doc.agent_capabilities.code)
+    if step == "review":
+        return _dedupe_strings(task_doc.agent_capabilities.review)
+    raise click.ClickException(f"Unsupported capability step: {step}")
+
+
+def _resolve_task_capabilities(
+    task_doc: Task | TaskJson | None,
+    config: RalphConfig,
+    *,
+    step: str,
+) -> list[_ResolvedCapability]:
+    capability_ids = _task_capability_ids(task_doc, step=step)
+    resolved: list[_ResolvedCapability] = []
+    for capability_id in capability_ids:
+        try:
+            capability = config.get_capability(capability_id)
+        except KeyError as exc:
+            raise click.ClickException(
+                f"Task references undefined capability `{capability_id}` for `{step}`. "
+                "Define it in `agent_capabilities` within ralph-config.yaml."
+            ) from exc
+        resolved.append(_ResolvedCapability(capability_id=capability_id, capability=capability))
+    return resolved
+
+
+def _ensure_capabilities_available(capabilities: list[_ResolvedCapability], config: RalphConfig) -> None:
+    workspace_dir = Path(config.workspace_dir)
+    for resolved in capabilities:
+        check_command = resolved.capability.check_command
+        if not check_command:
+            continue
+        completed = subprocess.run(
+            ["bash", "-lc", check_command],
+            cwd=str(workspace_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0:
+            continue
+        details = _tail(f"{completed.stdout}\n{completed.stderr}".strip(), max_chars=1000)
+        raise click.ClickException(
+            "Capability check failed for "
+            f"`{resolved.capability_id}` (command: `{check_command}`).\n{details}"
+        )
+
+
+def _capability_prompt_context(capabilities: list[_ResolvedCapability]) -> list[dict[str, str]]:
+    return [
+        {
+            "id": resolved.capability_id,
+            "type": resolved.capability.type,
+            "instruction": resolved.capability.instruction,
+        }
+        for resolved in capabilities
+    ]
+
+
+def _capability_backend_flags(
+    capabilities: list[_ResolvedCapability],
+    config: RalphConfig,
+    *,
+    engine: str,
+    step: str,
+) -> list[str]:
+    flags: list[str] = []
+    for resolved in capabilities:
+        flags.extend(
+            config.capability_backend_flags(
+                resolved.capability_id,
+                engine=engine,
+                step=step,
+            )
+        )
+    return _dedupe_strings(flags)
+
+
+def _merge_flags(*flag_groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    for group in flag_groups:
+        merged.extend(group)
+    return _dedupe_strings(merged)
+
+
+def _validate_task_capability_ids(task_doc: TaskJson, config: RalphConfig) -> list[str]:
+    errors: list[str] = []
+    for step, ids in (
+        ("code", task_doc.agent_capabilities.code),
+        ("review", task_doc.agent_capabilities.review),
+    ):
+        for capability_id in _dedupe_strings(ids):
+            if capability_id not in config.agent_capabilities:
+                errors.append(
+                    f"Task {task_doc.id} references undefined capability "
+                    f"`{capability_id}` in `agent_capabilities.{step}`"
+                )
+    return errors
+
+
 def _build_coder_prompt(task_progress: Any, config: RalphConfig) -> str:
     """Render the coder prompt through the Jinja2 template, including retry feedback."""
     task_path = _resolve_task_file_path(str(task_progress.task_file), config)
@@ -280,6 +441,8 @@ def _build_coder_prompt(task_progress: Any, config: RalphConfig) -> str:
         files_not_to_touch = task_doc.frontmatter.files_not_to_touch
         constraints = task_doc.constraints
         reference_impl = task_doc.reference_impl
+
+    capabilities = _resolve_task_capabilities(task_doc, config, step="code")
 
     is_retry = getattr(task_progress, "retries", 0) > 0
     feedback_entries = getattr(task_progress, "feedback", [])
@@ -314,6 +477,7 @@ def _build_coder_prompt(task_progress: Any, config: RalphConfig) -> str:
         max_retries=config.max_retries,
         project_instructions=project_instructions,
         contract_content=contract_content,
+        capabilities=capabilities and _capability_prompt_context(capabilities),
     )
 
 
@@ -359,6 +523,202 @@ def _build_inspector_prompt(task: Any, verification_results: list[dict[str, Any]
     if verification_results:
         lines.extend(["", "## Verification results", json.dumps(verification_results, indent=2)])
     return "\n".join(lines) + "\n"
+
+
+class ReviewerVerdict(BaseModel):
+    """Normalized schema for unified reviewer output."""
+
+    verdict: str
+    methods_used: list[str]
+    feedback: str
+    findings: list[str] = Field(default_factory=list)
+
+
+def _capture_git_diff_since(workspace_dir: str, base_sha: str | None) -> str:
+    command = ["git", "--no-pager", "diff", "--binary"]
+    if base_sha:
+        command.append(base_sha)
+
+    completed = subprocess.run(
+        command,
+        cwd=workspace_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    diff_text = completed.stdout
+    if len(diff_text) <= 120_000:
+        return diff_text
+    return diff_text[-120_000:]
+
+
+def _task_review_context(task: Any, config: RalphConfig) -> dict[str, Any]:
+    task_doc = _task_for_inspector(task, config)
+
+    if isinstance(task_doc, TaskJson):
+        return {
+            "title": task_doc.title,
+            "description": task_doc.inspect.description_summary or task_doc.description,
+            "acceptance_criteria": task_doc.inspect.acceptance_criteria or task_doc.acceptance_criteria,
+            "constraints": task_doc.constraints,
+            "files_to_touch": task_doc.files_to_touch,
+            "files_not_to_touch": task_doc.files_not_to_touch,
+            "legacy_visual": (
+                {
+                    "url": task_doc.visual.url,
+                    "assertion": task_doc.visual.assertion,
+                    "reference": task_doc.visual.reference,
+                    "setup_commands": task_doc.visual.setup_commands,
+                    "teardown_commands": task_doc.visual.teardown_commands,
+                }
+                if task_doc.visual is not None
+                else None
+            ),
+            "task_doc": task_doc,
+        }
+
+    if isinstance(task_doc, Task):
+        visual_verify = task_doc.frontmatter.visual_verify
+        return {
+            "title": task_doc.title,
+            "description": task_doc.description,
+            "acceptance_criteria": task_doc.acceptance_criteria,
+            "constraints": task_doc.constraints,
+            "files_to_touch": task_doc.frontmatter.files_to_touch,
+            "files_not_to_touch": task_doc.frontmatter.files_not_to_touch,
+            "legacy_visual": (
+                {
+                    "url": visual_verify.url,
+                    "assertion": visual_verify.assertion,
+                    "reference": visual_verify.reference,
+                    "setup_commands": visual_verify.setup_commands,
+                    "teardown_commands": visual_verify.teardown_commands,
+                }
+                if visual_verify is not None
+                else None
+            ),
+            "task_doc": task_doc,
+        }
+
+    return {
+        "title": getattr(task, "title", "Task"),
+        "description": getattr(task, "description", ""),
+        "acceptance_criteria": getattr(task, "acceptance_criteria", []),
+        "constraints": [],
+        "files_to_touch": [],
+        "files_not_to_touch": [],
+        "legacy_visual": None,
+        "task_doc": None,
+    }
+
+
+def _build_reviewer_prompt(
+    task: Any,
+    config: RalphConfig,
+    iteration: dict[str, Any],
+) -> str:
+    context = _task_review_context(task, config)
+    task_doc = context.get("task_doc")
+    review_capabilities = _resolve_task_capabilities(task_doc, config, step="review")
+    results = iteration.get("results")
+    if not isinstance(results, list):
+        results = []
+
+    verify_results = [
+        item for item in results if isinstance(item, dict) and str(item.get("step")) == "verify"
+    ]
+    runtime_results = [
+        item
+        for item in results
+        if isinstance(item, dict) and str(item.get("step", "")).startswith("runtime_")
+    ]
+
+    task_base_sha = str(iteration.get("task_base_sha", "")).strip() or None
+    git_diff = _capture_git_diff_since(config.workspace_dir, task_base_sha)
+
+    project_instructions = _load_optional_file(config.project_instructions)
+    contract_content: str | None = None
+    contract_file = getattr(task, "contract_file", None)
+    if contract_file:
+        contract_content = _load_optional_file(contract_file)
+
+    template_path = Path(__file__).resolve().parent / "prompts" / "reviewer.md.j2"
+    template = Template(template_path.read_text(encoding="utf-8"))
+    return template.render(
+        task_id=getattr(task, "id", ""),
+        task_title=context["title"],
+        task_description=context["description"],
+        acceptance_criteria=context["acceptance_criteria"],
+        constraints=context["constraints"],
+        files_to_touch=context["files_to_touch"],
+        files_not_to_touch=context["files_not_to_touch"],
+        task_base_sha=task_base_sha,
+        git_diff=git_diff,
+        verify_results=verify_results,
+        verify_results_json=json.dumps(verify_results, indent=2),
+        runtime_results=runtime_results,
+        runtime_results_json=json.dumps(runtime_results, indent=2),
+        legacy_visual=context["legacy_visual"],
+        legacy_visual_json=json.dumps(context["legacy_visual"], indent=2)
+        if context["legacy_visual"] is not None
+        else "",
+        project_instructions=project_instructions,
+        contract_content=contract_content,
+        capabilities=review_capabilities and _capability_prompt_context(review_capabilities),
+    )
+
+
+def _parse_reviewer_output(stdout: str) -> tuple[str, str]:
+    try:
+        parsed_raw = _extract_first_json_object(stdout)
+        parsed = ReviewerVerdict.model_validate(parsed_raw)
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        return "fail", f"Reviewer output could not be parsed as valid JSON schema: {exc}"
+
+    verdict = parsed.verdict.strip().lower()
+    if verdict not in {"pass", "fail"}:
+        return "fail", f"Reviewer verdict must be pass|fail, got: {parsed.verdict}"
+    if not parsed.methods_used:
+        return "fail", "Reviewer output missing methods_used evidence"
+
+    findings = "\n".join(f"- {item}" for item in parsed.findings if item.strip())
+    details = f"Methods: {', '.join(parsed.methods_used)}\n{parsed.feedback.strip()}"
+    if findings:
+        details = f"{details}\nFindings:\n{findings}"
+    return verdict, details
+
+
+def _review_backend_role(config: RalphConfig) -> str:
+    for role in ("reviewer", "inspect", "inspector"):
+        if role in config.backends:
+            return role
+    raise click.ClickException("No reviewer backend configured (reviewer/inspect/inspector)")
+
+
+def _runtime_guard_for_phase(config: RalphConfig, phase: str) -> RuntimeGuardConfig | None:
+    if phase == "pre_code":
+        return config.runtime_guards.pre_code
+    if phase == "post_code":
+        return config.runtime_guards.post_code
+    raise click.ClickException(f"Unknown runtime guard phase: {phase}")
+
+
+def _runtime_step_name(phase: str) -> str:
+    return f"runtime_{phase}"
+
+
+def _capture_head_sha(workspace_dir: str) -> str | None:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    sha = completed.stdout.strip()
+    return sha or None
 
 
 def _summary(progress: Progress) -> dict[str, int]:
@@ -424,6 +784,106 @@ def _collect_verification_results(iteration: dict[str, Any]) -> list[dict[str, A
 
 def _visual_backend_role(config: RalphConfig) -> str:
     return "visual" if "visual" in config.backends else "inspector"
+
+
+def _emit_code_action(
+    *,
+    task: Any,
+    config: RalphConfig,
+    paths: _Paths,
+) -> dict[str, Any]:
+    coder = config.get_backend("coder")
+    task_doc = _load_task_document(task, config)
+    code_capabilities = _resolve_task_capabilities(task_doc, config, step="code")
+    _ensure_capabilities_available(code_capabilities, config)
+    capability_flags = _capability_backend_flags(
+        code_capabilities,
+        config,
+        engine=coder.engine,
+        step="code",
+    )
+    coder_flags = _merge_flags(
+        _with_dynamic_codex_reasoning(
+            coder,
+            step="code",
+            task_retries=getattr(task, "retries", 0),
+        ),
+        capability_flags,
+    )
+    return {
+        "command": "code",
+        "task_id": task.id,
+        "image": f"ralph-loop-{coder.engine}",
+        "prompt_file": str(paths.coder_prompt_path),
+        "model": coder.model,
+        "timeout_seconds": coder.timeout_seconds,
+        "extra_flags": coder_flags,
+        "capabilities": [item.capability_id for item in code_capabilities],
+        "auth": config.get_auth(coder.engine).model_dump(),
+    }
+
+
+def _emit_runtime_action(
+    *,
+    task: Any,
+    config: RalphConfig,
+    phase: str,
+) -> dict[str, Any] | None:
+    guard = _runtime_guard_for_phase(config, phase)
+    if guard is None:
+        return None
+    return {
+        "command": "runtime",
+        "task_id": task.id,
+        "phase": phase,
+        "runtime_command": guard.command,
+        "timeout_seconds": guard.timeout_seconds,
+        "on_failure": guard.on_failure,
+        "workspace_dir": config.workspace_dir,
+    }
+
+
+def _emit_review_action(
+    *,
+    task: Any,
+    config: RalphConfig,
+    paths: _Paths,
+    iteration: dict[str, Any],
+) -> dict[str, Any]:
+    task_doc = _task_for_inspector(task, config)
+    review_capabilities = _resolve_task_capabilities(task_doc, config, step="review")
+    _ensure_capabilities_available(review_capabilities, config)
+
+    reviewer_prompt = _build_reviewer_prompt(task, config, iteration)
+    paths.reviewer_prompt_path.write_text(reviewer_prompt, encoding="utf-8")
+
+    reviewer_role = _review_backend_role(config)
+    reviewer_cfg = config.get_backend(reviewer_role)
+    capability_flags = _capability_backend_flags(
+        review_capabilities,
+        config,
+        engine=reviewer_cfg.engine,
+        step="review",
+    )
+    reviewer_flags = _merge_flags(
+        _with_dynamic_codex_reasoning(
+            reviewer_cfg,
+            step="review",
+            task_retries=getattr(task, "retries", 0),
+        ),
+        capability_flags,
+    )
+    return {
+        "command": "review",
+        "task_id": task.id,
+        "image": f"ralph-loop-{reviewer_cfg.engine}",
+        "prompt_file": str(paths.reviewer_prompt_path),
+        "model": reviewer_cfg.model,
+        "timeout_seconds": reviewer_cfg.timeout_seconds,
+        "extra_flags": reviewer_flags,
+        "capabilities": [item.capability_id for item in review_capabilities],
+        "auth": config.get_auth(reviewer_cfg.engine).model_dump(),
+    }
 
 
 def _with_dynamic_codex_reasoning(
@@ -498,13 +958,17 @@ def _run_prompt_with_available_backend(
         extra_flags=extra_flags or [],
         cwd=str(backend_cwd),
     )
+    stdout = str(getattr(result, "stdout", "") or "")
+    stderr = str(getattr(result, "stderr", "") or "")
+    output_streamed = bool(getattr(result, "output_streamed", False))
+    exit_code = int(getattr(result, "exit_code", 1))
 
-    if result.stdout and not result.output_streamed:
-        click.echo(result.stdout, nl=False)
-    if result.stderr and not result.output_streamed:
-        click.echo(result.stderr, err=True, nl=False)
+    if stdout and not output_streamed:
+        click.echo(stdout, nl=False)
+    if stderr and not output_streamed:
+        click.echo(stderr, err=True, nl=False)
 
-    return int(result.exit_code)
+    return exit_code
 
 
 def _infer_prompt_cwd(prompt_file: Path) -> Path:
@@ -613,25 +1077,256 @@ def _slugify(value: str) -> str:
 
 
 def _derive_loop_dir_from_source(source: Path) -> Path:
-    return source.parent / ".ralph-loop" / _slugify(source.stem)
+    return source.parent / ".ralph-loop"
+
+
+_DEFAULT_GUARD_COMMAND = "./scripts/ralph/guard.sh"
+_DEFAULT_GUARD_RELATIVE_PATH = Path("scripts/ralph/guard.sh")
+_DEFAULT_VERIFY_FILE_RELATIVE_PATH = Path("scripts/ralph/verify-commands.txt")
+_DEFAULT_VERIFY_COMMAND = "docker compose exec videntus-dev-server pnpm exec tsc --noEmit"
+_DEFAULT_GUARD_SCRIPT = """#!/usr/bin/env bash
+set -euo pipefail
+
+MODE="${1:-full}"
+PROJECT_URL="${PROJECT_URL:-http://localhost:3001}"
+SERVICE_NAME="${SERVICE_NAME:-videntus-dev-server}"
+MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-45}"
+VERIFY_FILE="${VERIFY_FILE:-scripts/ralph/verify-commands.txt}"
+
+run_service_checks() {
+  docker compose up -d "$SERVICE_NAME" >/dev/null
+
+  for ((second=1; second<=MAX_WAIT_SECONDS; second++)); do
+    if curl -fsS "$PROJECT_URL" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "guard failed: service '$SERVICE_NAME' did not become ready at '$PROJECT_URL' in ${MAX_WAIT_SECONDS}s" >&2
+  return 1
+}
+
+run_verify_checks() {
+  if [[ ! -f "$VERIFY_FILE" ]]; then
+    echo "guard failed: verify command file not found: $VERIFY_FILE" >&2
+    return 1
+  fi
+
+  local executed=0
+  while IFS= read -r cmd; do
+    [[ -z "$cmd" ]] && continue
+    [[ "$cmd" == \\#* ]] && continue
+    echo "[guard] verify -> $cmd"
+    bash -lc "$cmd"
+    executed=1
+  done < "$VERIFY_FILE"
+
+  if [[ "$executed" -eq 0 ]]; then
+    echo "guard failed: no verify commands configured in $VERIFY_FILE" >&2
+    return 1
+  fi
+}
+
+case "$MODE" in
+  full)
+    run_service_checks
+    run_verify_checks
+    exit 0
+    ;;
+  verify-only)
+    run_verify_checks
+    exit 0
+    ;;
+  *)
+    echo "guard failed: invalid mode '$MODE' (expected: full|verify-only)" >&2
+    exit 2
+    ;;
+esac
+"""
+
+
+def _normalized_backend_for_reviewer(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    engine = raw.get("engine")
+    if not isinstance(engine, str) or not engine.strip():
+        return None
+
+    normalized: dict[str, Any] = {"engine": engine}
+    model = raw.get("model")
+    if isinstance(model, str) and model.strip():
+        normalized["model"] = model
+
+    timeout_seconds = raw.get("timeout_seconds")
+    if isinstance(timeout_seconds, int) and timeout_seconds > 0:
+        normalized["timeout_seconds"] = timeout_seconds
+    else:
+        normalized["timeout_seconds"] = 300
+
+    extra_flags = raw.get("extra_flags")
+    if isinstance(extra_flags, list):
+        normalized["extra_flags"] = extra_flags
+
+    return normalized
+
+
+def _default_reviewer_backend(backends: dict[str, Any]) -> dict[str, Any]:
+    for role in ("inspector", "inspect", "coder"):
+        candidate = _normalized_backend_for_reviewer(backends.get(role))
+        if candidate is not None:
+            return candidate
+    return {
+        "engine": "codex",
+        "model": "gpt-5.4-codex",
+        "timeout_seconds": 300,
+        "extra_flags": [],
+    }
+
+
+def _normalize_runtime_guard(
+    raw: Any,
+    *,
+    default_on_failure: str,
+) -> tuple[dict[str, Any], bool]:
+    changed = False
+    guard: dict[str, Any]
+    if isinstance(raw, dict):
+        guard = dict(raw)
+    else:
+        guard = {}
+        changed = True
+
+    command = guard.get("command")
+    if not isinstance(command, str) or not command.strip():
+        guard["command"] = _DEFAULT_GUARD_COMMAND
+        changed = True
+
+    timeout_seconds = guard.get("timeout_seconds")
+    if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+        guard["timeout_seconds"] = 180
+        changed = True
+
+    on_failure = guard.get("on_failure")
+    if on_failure not in {"pause_loop", "abort_loop", "fail_attempt"}:
+        guard["on_failure"] = default_on_failure
+        changed = True
+
+    return guard, changed
+
+
+def _non_empty_verify_commands(raw_value: Any) -> list[str]:
+    commands: list[str] = []
+    if not isinstance(raw_value, list):
+        return commands
+    for value in raw_value:
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized:
+                commands.append(normalized)
+    return commands
+
+
+def _ensure_guard_assets(config: RalphConfig) -> tuple[Path, Path]:
+    workspace = Path(config.workspace_dir).expanduser().resolve()
+    guard_path = (workspace / _DEFAULT_GUARD_RELATIVE_PATH).resolve()
+    verify_file_path = (workspace / _DEFAULT_VERIFY_FILE_RELATIVE_PATH).resolve()
+    guard_path.parent.mkdir(parents=True, exist_ok=True)
+    verify_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if guard_path.exists() and not guard_path.is_file():
+        raise click.ClickException(f"Guard path is not a file: {guard_path}")
+
+    if not guard_path.exists() or not guard_path.read_text(encoding="utf-8").strip():
+        click.echo(f"[init] Writing runtime guard script: {guard_path}")
+        guard_path.write_text(_DEFAULT_GUARD_SCRIPT, encoding="utf-8")
+
+    mode = guard_path.stat().st_mode
+    if (mode & 0o111) == 0:
+        guard_path.chmod(mode | 0o755)
+        click.echo(f"[init] Marked runtime guard script as executable: {guard_path}")
+
+    verify_commands = _non_empty_verify_commands(config.verify_commands)
+    if not verify_commands:
+        verify_commands = [_DEFAULT_VERIFY_COMMAND]
+
+    if not verify_file_path.exists() or not verify_file_path.read_text(encoding="utf-8").strip():
+        click.echo(f"[init] Writing verify command file: {verify_file_path}")
+        verify_file_path.write_text("\n".join(verify_commands) + "\n", encoding="utf-8")
+
+    return guard_path, verify_file_path
 
 
 def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
+    raw_payload: dict[str, Any] = {}
     if config_path.exists():
-        return RalphConfig.load(str(config_path), loop_dir=str(loop_dir))
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            raw_payload = loaded
+    else:
+        raw_payload = {
+            "max_retries": 3,
+            "backends": {
+                "coder": {"engine": "codex", "model": "gpt-5.3-codex", "timeout_seconds": 600},
+                "inspector": {
+                    "engine": "copilot",
+                    "model": "claude-opus-4-6",
+                    "timeout_seconds": 300,
+                },
+            },
+            "verify_commands": [],
+            "auth": {},
+        }
 
-    scaffold = {
-        "max_retries": 3,
-        "backends": {
-            "coder": {"engine": "codex", "model": "gpt-5.3-codex", "timeout_seconds": 600},
-            "inspector": {"engine": "copilot", "model": "claude-opus-4-6", "timeout_seconds": 300},
-        },
-        "verify_commands": [],
-        "auth": {},
-    }
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.safe_dump(scaffold, sort_keys=False), encoding="utf-8")
-    return RalphConfig.load(str(config_path), loop_dir=str(loop_dir))
+    changed = False
+    if raw_payload.get("review_mode") != "unified_agent":
+        raw_payload["review_mode"] = "unified_agent"
+        changed = True
+
+    backends = raw_payload.get("backends")
+    if not isinstance(backends, dict):
+        backends = {}
+        raw_payload["backends"] = backends
+        changed = True
+
+    reviewer = _normalized_backend_for_reviewer(backends.get("reviewer"))
+    if reviewer is None:
+        backends["reviewer"] = _default_reviewer_backend(backends)
+        changed = True
+
+    runtime_guards = raw_payload.get("runtime_guards")
+    if not isinstance(runtime_guards, dict):
+        runtime_guards = {}
+        raw_payload["runtime_guards"] = runtime_guards
+        changed = True
+
+    pre_code, pre_changed = _normalize_runtime_guard(
+        runtime_guards.get("pre_code"),
+        default_on_failure="pause_loop",
+    )
+    runtime_guards["pre_code"] = pre_code
+    changed = changed or pre_changed
+
+    post_code, post_changed = _normalize_runtime_guard(
+        runtime_guards.get("post_code"),
+        default_on_failure="fail_attempt",
+    )
+    runtime_guards["post_code"] = post_code
+    changed = changed or post_changed
+
+    verify_commands = _non_empty_verify_commands(raw_payload.get("verify_commands"))
+    if not verify_commands:
+        raw_payload["verify_commands"] = [_DEFAULT_VERIFY_COMMAND]
+        changed = True
+
+    if changed or not config_path.exists():
+        click.echo(f"[init] Updating loop config defaults: {config_path}")
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(yaml.safe_dump(raw_payload, sort_keys=False), encoding="utf-8")
+
+    config = RalphConfig.load(str(config_path), loop_dir=str(loop_dir))
+    _ensure_guard_assets(config)
+    return config
 
 
 def _load_plan_template() -> Template:
@@ -920,11 +1615,29 @@ def _build_prompt(source_content: str, config: RalphConfig, user_directives: str
         if instructions_path.exists():
             project_instructions = instructions_path.read_text(encoding="utf-8")
 
+    available_capabilities: list[dict[str, Any]] = []
+    for capability_id, capability in config.agent_capabilities.items():
+        supports_code = any(flags.code for flags in capability.backend_flags.values())
+        supports_review = any(flags.review for flags in capability.backend_flags.values())
+        if not capability.backend_flags:
+            supports_code = True
+            supports_review = True
+        available_capabilities.append(
+            {
+                "id": capability_id,
+                "type": capability.type,
+                "instruction": capability.instruction,
+                "supports_code": supports_code,
+                "supports_review": supports_review,
+            }
+        )
+
     template = _load_plan_template()
     return template.render(
         source_content=source_content,
         project_instructions=project_instructions,
         user_directives=user_directives,
+        available_capabilities=available_capabilities,
     )
 
 
@@ -1047,8 +1760,10 @@ def _write_init_attempt_artifacts(
 
     stdout_path = tmp_dir / f"init-attempt-{attempt:02d}-stdout.txt"
     stderr_path = tmp_dir / f"init-attempt-{attempt:02d}-stderr.txt"
-    stdout_path.write_text(result.stdout, encoding="utf-8")
-    stderr_path.write_text(result.stderr, encoding="utf-8")
+    stdout_text = str(getattr(result, "stdout", "") or "")
+    stderr_text = str(getattr(result, "stderr", "") or "")
+    stdout_path.write_text(stdout_text, encoding="utf-8")
+    stderr_path.write_text(stderr_text, encoding="utf-8")
     return prompt_path, stdout_path, stderr_path
 
 
@@ -1235,7 +1950,16 @@ def validate_command(config_path: str, loop_dir: str) -> None:
     for task_path in sorted(progress_task_files):
         if task_path.suffix.lower() != ".json":
             continue
-        validation_errors.extend(validate_task_file(task_path))
+        json_errors = validate_task_file(task_path)
+        validation_errors.extend(json_errors)
+        if json_errors:
+            continue
+        try:
+            task_doc = TaskJson.load(task_path)
+        except Exception as exc:  # noqa: BLE001
+            validation_errors.append(f"Task schema error in {task_path}: {exc}")
+            continue
+        validation_errors.extend(_validate_task_capability_ids(task_doc, config))
 
     if validation_errors:
         raise click.ClickException("\n".join(validation_errors))
@@ -1267,6 +1991,7 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
     progress = load_progress(config.progress_file)
     paths = _runtime_paths(config)
     paths.tmp_dir.mkdir(parents=True, exist_ok=True)
+    unified_mode = config.review_mode == "unified_agent"
 
     if Path(config.pause_file).exists():
         click.echo(
@@ -1288,6 +2013,107 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
         task_id = str(iteration.get("task_id", ""))
         task = find_task(progress, task_id)
         step_name = str(step_result.get("step", ""))
+
+        if unified_mode:
+            if step_name == _runtime_step_name("pre_code"):
+                runtime_exit = int(step_result.get("exit_code", 1))
+                if runtime_exit == 0:
+                    iteration["runtime_pre_ok"] = True
+                    iteration["current_step"] = "code"
+                    _save_iteration_state(paths.iteration_path, iteration)
+                    click.echo(json.dumps(_emit_code_action(task=task, config=config, paths=paths)))
+                    return
+
+                guard = _runtime_guard_for_phase(config, "pre_code")
+                policy = guard.on_failure if guard is not None else "fail_attempt"
+                iteration["runtime_pre_ok"] = False
+                _save_iteration_state(paths.iteration_path, iteration)
+
+                if policy == "fail_attempt":
+                    iteration["current_step"] = "update"
+                    _save_iteration_state(paths.iteration_path, iteration)
+                    click.echo(json.dumps({"command": "update", "task_id": task.id}))
+                    return
+
+                if policy == "abort_loop":
+                    click.echo(
+                        json.dumps(
+                            {
+                                "command": "abort",
+                                "task_id": task.id,
+                                "reason": "runtime_pre_code_failed",
+                            }
+                        )
+                    )
+                    return
+
+                click.echo(
+                    json.dumps(
+                        {
+                            "command": "pause",
+                            "task_id": task.id,
+                            "reason": "runtime_pre_code_failed",
+                        }
+                    )
+                )
+                return
+
+            if step_name == "code":
+                code_exit = int(step_result.get("exit_code", 1))
+                if code_exit != 0:
+                    iteration["current_step"] = "update"
+                    _save_iteration_state(paths.iteration_path, iteration)
+                    click.echo(json.dumps({"command": "update", "task_id": task.id}))
+                    return
+
+                runtime_post_action = _emit_runtime_action(task=task, config=config, phase="post_code")
+                if runtime_post_action is not None:
+                    iteration["current_step"] = "runtime_post_code"
+                    _save_iteration_state(paths.iteration_path, iteration)
+                    click.echo(json.dumps(runtime_post_action))
+                    return
+
+                iteration["current_step"] = "review"
+                _save_iteration_state(paths.iteration_path, iteration)
+                click.echo(
+                    json.dumps(
+                        _emit_review_action(
+                            task=task,
+                            config=config,
+                            paths=paths,
+                            iteration=iteration,
+                        )
+                    )
+                )
+                return
+
+            if step_name == _runtime_step_name("post_code"):
+                runtime_exit = int(step_result.get("exit_code", 1))
+                if runtime_exit != 0:
+                    iteration["current_step"] = "update"
+                    _save_iteration_state(paths.iteration_path, iteration)
+                    click.echo(json.dumps({"command": "update", "task_id": task.id}))
+                    return
+
+                iteration["current_step"] = "review"
+                _save_iteration_state(paths.iteration_path, iteration)
+                click.echo(
+                    json.dumps(
+                        _emit_review_action(
+                            task=task,
+                            config=config,
+                            paths=paths,
+                            iteration=iteration,
+                        )
+                    )
+                )
+                return
+
+            if step_name in {"review", "verify", "visual", "inspect"}:
+                iteration["current_step"] = "update"
+                _save_iteration_state(paths.iteration_path, iteration)
+                click.echo(json.dumps({"command": "update", "task_id": task.id}))
+                return
 
         if step_name == "code":
             verify_commands = _task_verify_commands(task, config)
@@ -1456,6 +2282,129 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
             click.echo(json.dumps({"command": "update", "task_id": task.id}))
             return
 
+    if iteration is not None and step_result is None:
+        current_step = str(iteration.get("current_step", ""))
+        task_id = str(iteration.get("task_id", ""))
+        if current_step == "update":
+            _clear_iteration_state(paths.iteration_path)
+            iteration = None
+        elif task_id:
+            task = find_task(progress, task_id)
+            if unified_mode:
+                if current_step == "runtime_pre_code":
+                    runtime_pre_action = _emit_runtime_action(
+                        task=task, config=config, phase="pre_code"
+                    )
+                    if runtime_pre_action is not None:
+                        click.echo(json.dumps(runtime_pre_action))
+                        return
+                    iteration["current_step"] = "code"
+                    _save_iteration_state(paths.iteration_path, iteration)
+                    click.echo(json.dumps(_emit_code_action(task=task, config=config, paths=paths)))
+                    return
+                if current_step == "code":
+                    click.echo(json.dumps(_emit_code_action(task=task, config=config, paths=paths)))
+                    return
+                if current_step == "runtime_post_code":
+                    runtime_post_action = _emit_runtime_action(
+                        task=task, config=config, phase="post_code"
+                    )
+                    if runtime_post_action is not None:
+                        click.echo(json.dumps(runtime_post_action))
+                        return
+                    iteration["current_step"] = "review"
+                    _save_iteration_state(paths.iteration_path, iteration)
+                    click.echo(
+                        json.dumps(
+                            _emit_review_action(
+                                task=task,
+                                config=config,
+                                paths=paths,
+                                iteration=iteration,
+                            )
+                        )
+                    )
+                    return
+                if current_step == "review":
+                    click.echo(
+                        json.dumps(
+                            _emit_review_action(
+                                task=task,
+                                config=config,
+                                paths=paths,
+                                iteration=iteration,
+                            )
+                        )
+                    )
+                    return
+            else:
+                if current_step == "code":
+                    click.echo(json.dumps(_emit_code_action(task=task, config=config, paths=paths)))
+                    return
+                if current_step == "verify":
+                    click.echo(
+                        json.dumps(
+                            {
+                                "command": "verify",
+                                "task_id": task.id,
+                                "commands": _task_verify_commands(task, config),
+                                "workspace_dir": config.workspace_dir,
+                            }
+                        )
+                    )
+                    return
+                if current_step == "visual":
+                    visual_config = _task_visual_verify(task, config) or task.visual_verify
+                    if visual_config is not None:
+                        visual_role = _visual_backend_role(config)
+                        visual = config.get_backend(visual_role)
+                        visual_flags = _with_dynamic_codex_reasoning(
+                            visual,
+                            step="visual",
+                            task_retries=task.retries,
+                        )
+                        click.echo(
+                            json.dumps(
+                                {
+                                    "command": "visual",
+                                    "task_id": task.id,
+                                    "image": f"ralph-loop-{visual.engine}",
+                                    "model": visual.model,
+                                    "timeout_seconds": visual.timeout_seconds,
+                                    "extra_flags": visual_flags,
+                                    "setup_commands": visual_config.setup_commands,
+                                    "teardown_commands": visual_config.teardown_commands,
+                                    "workspace_dir": config.workspace_dir,
+                                    "auth": config.get_auth(visual.engine).model_dump(),
+                                }
+                            )
+                        )
+                        return
+                if current_step == "inspect":
+                    inspector_prompt = _build_inspector_prompt(_task_for_inspector(task, config), None)
+                    paths.inspector_prompt_path.write_text(inspector_prompt, encoding="utf-8")
+                    inspector = config.get_backend("inspector")
+                    inspector_flags = _with_dynamic_codex_reasoning(
+                        inspector,
+                        step="inspect",
+                        task_retries=task.retries,
+                    )
+                    click.echo(
+                        json.dumps(
+                            {
+                                "command": "inspect",
+                                "task_id": task.id,
+                                "image": f"ralph-loop-{inspector.engine}",
+                                "prompt_file": str(paths.inspector_prompt_path),
+                                "model": inspector.model,
+                                "timeout_seconds": inspector.timeout_seconds,
+                                "extra_flags": inspector_flags,
+                                "auth": config.get_auth(inspector.engine).model_dump(),
+                            }
+                        )
+                    )
+                    return
+
     if iteration is not None and iteration.get("current_step") == "update":
         _clear_iteration_state(paths.iteration_path)
         iteration = None
@@ -1499,34 +2448,29 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
     coder_prompt = _build_coder_prompt(next_task, config)
     paths.coder_prompt_path.write_text(coder_prompt, encoding="utf-8")
 
+    initial_step = "code"
+    task_base_sha: str | None = None
+    if unified_mode:
+        task_base_sha = _capture_head_sha(config.workspace_dir)
+        initial_step = "runtime_pre_code" if config.runtime_guards.pre_code is not None else "code"
+
     iteration = {
         "task_id": next_task.id,
-        "current_step": "code",
+        "current_step": initial_step,
         "started_at": _now_iso(),
         "results": [],
+        "task_base_sha": task_base_sha,
+        "runtime_pre_ok": False,
     }
     _save_iteration_state(paths.iteration_path, iteration)
 
-    coder = config.get_backend("coder")
-    coder_flags = _with_dynamic_codex_reasoning(
-        coder,
-        step="code",
-        task_retries=next_task.retries,
-    )
-    click.echo(
-        json.dumps(
-            {
-                "command": "code",
-                "task_id": next_task.id,
-                "image": f"ralph-loop-{coder.engine}",
-                "prompt_file": str(paths.coder_prompt_path),
-                "model": coder.model,
-                "timeout_seconds": coder.timeout_seconds,
-                "extra_flags": coder_flags,
-                "auth": config.get_auth(coder.engine).model_dump(),
-            }
-        )
-    )
+    if unified_mode and initial_step == "runtime_pre_code":
+        runtime_pre_action = _emit_runtime_action(task=next_task, config=config, phase="pre_code")
+        if runtime_pre_action is not None:
+            click.echo(json.dumps(runtime_pre_action))
+            return
+
+    click.echo(json.dumps(_emit_code_action(task=next_task, config=config, paths=paths)))
 
 
 @main.command("run")
@@ -1536,6 +2480,11 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
 def run_command(config_path: str, loop_dir: str, sandbox: str) -> None:
     """Run the native orchestration loop."""
     config = _load_config(config_path, loop_dir)
+    if config.review_mode == "unified_agent":
+        raise click.ClickException(
+            "Native `ralph-loop run` does not support `review_mode=unified_agent` yet. "
+            "Use the docker dispatcher script `./ralph-loop run`."
+        )
     raise SystemExit(run_loop(config, sandbox=sandbox))
 
 
@@ -1567,6 +2516,25 @@ def inspect_command(
     prompt_file: str, model: str | None, timeout_seconds: int, extra_flags: tuple[str, ...]
 ) -> None:
     """Execute an inspection prompt using an available AI CLI backend."""
+    exit_code = _run_prompt_with_available_backend(
+        Path(prompt_file),
+        model=model,
+        timeout_seconds=timeout_seconds,
+        extra_flags=list(extra_flags),
+    )
+    if exit_code != 0:
+        raise SystemExit(exit_code)
+
+
+@main.command("review")
+@click.option("--prompt-file", required=True)
+@click.option("--model", required=False)
+@click.option("--timeout-seconds", type=int, default=600, show_default=True)
+@click.option("--extra-flag", "extra_flags", multiple=True)
+def review_command(
+    prompt_file: str, model: str | None, timeout_seconds: int, extra_flags: tuple[str, ...]
+) -> None:
+    """Execute a unified reviewer prompt using an available AI CLI backend."""
     exit_code = _run_prompt_with_available_backend(
         Path(prompt_file),
         model=model,
@@ -1649,94 +2617,200 @@ def update_command(config_path: str, loop_dir: str, result_dir: str) -> None:
     task = find_task(progress, task_id)
     results = _collect_iteration_results(Path(result_dir), iteration)
 
-    all_passed = True
-    feedback_sources: list[FeedbackSource] = []
-    has_visual_result = False
-    has_inspect_result = False
-    visual_required = (_task_visual_verify(task, config) or task.visual_verify) is not None
+    if config.review_mode == "unified_agent":
+        all_passed = True
+        feedback_sources: list[FeedbackSource] = []
+        has_review_result = False
+        code_executed = False
+        code_success = False
+        runtime_pre_failed = False
+        runtime_post_failed = False
 
-    for item in results:
-        step_name = str(item.get("step", ""))
-        if step_name == "code":
-            exit_code = int(item.get("exit_code", 1))
-            if exit_code != 0:
-                all_passed = False
-                feedback_sources.append(
-                    FeedbackSource(
-                        type="code",
-                        verdict="fail",
-                        details=f"Code step failed with exit code {exit_code}",
-                    )
-                )
-            continue
-
-        if step_name == "verify":
-            command_results = item.get("results")
-            if isinstance(command_results, list):
-                for result in command_results:
-                    if not isinstance(result, dict):
-                        continue
-                    command = str(result.get("command", ""))
-                    exit_code = int(result.get("exit_code", 1))
-                    stdout = str(result.get("stdout", ""))
-                    stderr = str(result.get("stderr", ""))
-                    verdict = "pass" if exit_code == 0 else "fail"
-                    if verdict == "fail":
-                        all_passed = False
-                    combined = (stdout + "\n" + stderr).strip()
+        for item in results:
+            step_name = str(item.get("step", ""))
+            if step_name == "code":
+                code_executed = True
+                exit_code = int(item.get("exit_code", 1))
+                code_success = exit_code == 0
+                if not code_success:
+                    all_passed = False
                     feedback_sources.append(
                         FeedbackSource(
-                            type="test",
-                            verdict=verdict,
-                            command=command,
-                            exit_code=exit_code,
-                            output=combined,
+                            type="code",
+                            verdict="fail",
+                            details=f"Code step failed with exit code {exit_code}",
                         )
                     )
-            continue
+                continue
 
-        if step_name == "visual":
-            has_visual_result = True
-            verdict, feedback = _parse_inspector_output(str(item.get("stdout", "")))
-            step_exit_code = int(item.get("exit_code", 0))
-            if step_exit_code != 0:
-                verdict = "fail"
-                feedback = feedback or f"Visual step command failed with exit code {step_exit_code}"
-            if verdict != "pass":
-                all_passed = False
+            if step_name == "verify":
+                command_results = item.get("results")
+                if isinstance(command_results, list):
+                    for result in command_results:
+                        if not isinstance(result, dict):
+                            continue
+                        command = str(result.get("command", ""))
+                        exit_code = int(result.get("exit_code", 1))
+                        stdout = str(result.get("stdout", ""))
+                        stderr = str(result.get("stderr", ""))
+                        verdict = "pass" if exit_code == 0 else "fail"
+                        if verdict == "fail":
+                            all_passed = False
+                        combined = (stdout + "\n" + stderr).strip()
+                        feedback_sources.append(
+                            FeedbackSource(
+                                type="test",
+                                verdict=verdict,
+                                command=command,
+                                exit_code=exit_code,
+                                output=combined,
+                            )
+                        )
+                continue
+
+            if step_name in {"runtime_pre_code", "runtime_post_code"}:
+                exit_code = int(item.get("exit_code", 1))
+                runtime_command = str(item.get("runtime_command", ""))
+                stdout = str(item.get("stdout", ""))
+                stderr = str(item.get("stderr", ""))
+                if exit_code != 0:
+                    all_passed = False
+                    if step_name == "runtime_pre_code":
+                        runtime_pre_failed = True
+                    if step_name == "runtime_post_code":
+                        runtime_post_failed = True
+                    feedback_sources.append(
+                        FeedbackSource(
+                            type="runtime_guard",
+                            verdict="fail",
+                            command=runtime_command or None,
+                            exit_code=exit_code,
+                            output=(stdout + "\n" + stderr).strip(),
+                            details=f"{step_name} failed with exit code {exit_code}",
+                        )
+                    )
+                continue
+
+            if step_name == "review":
+                has_review_result = True
+                step_exit_code = int(item.get("exit_code", 0))
+                if step_exit_code != 0:
+                    all_passed = False
+                    feedback_sources.append(
+                        FeedbackSource(
+                            type="review",
+                            verdict="fail",
+                            details=f"Review step command failed with exit code {step_exit_code}",
+                        )
+                    )
+                    continue
+
+                verdict, feedback = _parse_reviewer_output(str(item.get("stdout", "")))
+                if verdict != "pass":
+                    all_passed = False
+                feedback_sources.append(
+                    FeedbackSource(type="review", verdict=verdict, details=feedback)
+                )
+
+        review_expected = code_executed and code_success and not runtime_pre_failed and not runtime_post_failed
+        if review_expected and not has_review_result:
+            all_passed = False
             feedback_sources.append(
-                FeedbackSource(type="visual", verdict=verdict, details=feedback)
+                FeedbackSource(
+                    type="review",
+                    verdict="fail",
+                    details="Review result missing for this attempt.",
+                )
             )
-            continue
+    else:
+        all_passed = True
+        feedback_sources = []
+        has_visual_result = False
+        has_inspect_result = False
+        visual_required = (_task_visual_verify(task, config) or task.visual_verify) is not None
 
-        if step_name == "inspect":
-            has_inspect_result = True
-            verdict, feedback = _parse_inspector_output(str(item.get("stdout", "")))
-            if verdict != "pass":
-                all_passed = False
+        for item in results:
+            step_name = str(item.get("step", ""))
+            if step_name == "code":
+                exit_code = int(item.get("exit_code", 1))
+                if exit_code != 0:
+                    all_passed = False
+                    feedback_sources.append(
+                        FeedbackSource(
+                            type="code",
+                            verdict="fail",
+                            details=f"Code step failed with exit code {exit_code}",
+                        )
+                    )
+                continue
+
+            if step_name == "verify":
+                command_results = item.get("results")
+                if isinstance(command_results, list):
+                    for result in command_results:
+                        if not isinstance(result, dict):
+                            continue
+                        command = str(result.get("command", ""))
+                        exit_code = int(result.get("exit_code", 1))
+                        stdout = str(result.get("stdout", ""))
+                        stderr = str(result.get("stderr", ""))
+                        verdict = "pass" if exit_code == 0 else "fail"
+                        if verdict == "fail":
+                            all_passed = False
+                        combined = (stdout + "\n" + stderr).strip()
+                        feedback_sources.append(
+                            FeedbackSource(
+                                type="test",
+                                verdict=verdict,
+                                command=command,
+                                exit_code=exit_code,
+                                output=combined,
+                            )
+                        )
+                continue
+
+            if step_name == "visual":
+                has_visual_result = True
+                verdict, feedback = _parse_inspector_output(str(item.get("stdout", "")))
+                step_exit_code = int(item.get("exit_code", 0))
+                if step_exit_code != 0:
+                    verdict = "fail"
+                    feedback = feedback or f"Visual step command failed with exit code {step_exit_code}"
+                if verdict != "pass":
+                    all_passed = False
+                feedback_sources.append(
+                    FeedbackSource(type="visual", verdict=verdict, details=feedback)
+                )
+                continue
+
+            if step_name == "inspect":
+                has_inspect_result = True
+                verdict, feedback = _parse_inspector_output(str(item.get("stdout", "")))
+                if verdict != "pass":
+                    all_passed = False
+                feedback_sources.append(
+                    FeedbackSource(type="ai_inspection", verdict=verdict, details=feedback)
+                )
+
+        if visual_required and not has_visual_result:
+            all_passed = False
             feedback_sources.append(
-                FeedbackSource(type="ai_inspection", verdict=verdict, details=feedback)
+                FeedbackSource(
+                    type="visual",
+                    verdict="fail",
+                    details="Visual verification was required but no visual result was recorded.",
+                )
             )
 
-    if visual_required and not has_visual_result:
-        all_passed = False
-        feedback_sources.append(
-            FeedbackSource(
-                type="visual",
-                verdict="fail",
-                details="Visual verification was required but no visual result was recorded.",
+        if not has_inspect_result:
+            all_passed = False
+            feedback_sources.append(
+                FeedbackSource(
+                    type="ai_inspection",
+                    verdict="fail",
+                    details="Inspector result missing for this attempt.",
+                )
             )
-        )
-
-    if not has_inspect_result:
-        all_passed = False
-        feedback_sources.append(
-            FeedbackSource(
-                type="ai_inspection",
-                verdict="fail",
-                details="Inspector result missing for this attempt.",
-            )
-        )
 
     if all_passed:
         complete_task(progress, task.id)
@@ -1856,8 +2930,10 @@ def init_command(
     generated_plan: GeneratedPlan | None = None
     validation_feedback: str | None = None
     attempts = 3
-    previous_stream_setting = os.environ.get("RALPH_COPILOT_STREAM_OUTPUT")
+    previous_copilot_stream_setting = os.environ.get("RALPH_COPILOT_STREAM_OUTPUT")
+    previous_codex_stream_setting = os.environ.get("RALPH_CODEX_STREAM_OUTPUT")
     os.environ["RALPH_COPILOT_STREAM_OUTPUT"] = "1"
+    os.environ["RALPH_CODEX_STREAM_OUTPUT"] = "1"
     try:
         for attempt in range(1, attempts + 1):
             candidate_plan, generation_error, generation_result, prompt_used = (
@@ -1877,10 +2953,13 @@ def init_command(
             )
 
             if generation_result is not None:
+                runtime_seconds = float(getattr(generation_result, "duration_seconds", 0.0))
+                result_exit_code = int(getattr(generation_result, "exit_code", 1))
+                timed_out = bool(getattr(generation_result, "timed_out", False))
                 click.echo(
                     "[init] Attempt "
-                    f"{attempt}/{attempts} backend runtime: {generation_result.duration_seconds:.1f}s "
-                    f"(exit={generation_result.exit_code}, timed_out={generation_result.timed_out})"
+                    f"{attempt}/{attempts} backend runtime: {runtime_seconds:.1f}s "
+                    f"(exit={result_exit_code}, timed_out={timed_out})"
                 )
                 click.echo(f"[init] Prompt artifact: {prompt_path}")
                 if stdout_path is not None:
@@ -1892,8 +2971,12 @@ def init_command(
                 validation_feedback = generation_error or "Unknown generation error"
                 click.echo(f"[init] Attempt {attempt}/{attempts} failed: {validation_feedback}")
                 if generation_result is not None:
-                    stderr_preview = _truncate_for_log(generation_result.stderr)
-                    stdout_preview = _truncate_for_log(generation_result.stdout)
+                    stderr_preview = _truncate_for_log(
+                        str(getattr(generation_result, "stderr", "") or "")
+                    )
+                    stdout_preview = _truncate_for_log(
+                        str(getattr(generation_result, "stdout", "") or "")
+                    )
                     if stderr_preview:
                         click.echo("[init] stderr preview:")
                         click.echo(stderr_preview)
@@ -1915,10 +2998,15 @@ def init_command(
             generated_plan = candidate_plan
             break
     finally:
-        if previous_stream_setting is None:
+        if previous_copilot_stream_setting is None:
             os.environ.pop("RALPH_COPILOT_STREAM_OUTPUT", None)
         else:
-            os.environ["RALPH_COPILOT_STREAM_OUTPUT"] = previous_stream_setting
+            os.environ["RALPH_COPILOT_STREAM_OUTPUT"] = previous_copilot_stream_setting
+
+        if previous_codex_stream_setting is None:
+            os.environ.pop("RALPH_CODEX_STREAM_OUTPUT", None)
+        else:
+            os.environ["RALPH_CODEX_STREAM_OUTPUT"] = previous_codex_stream_setting
 
     if generated_plan is None:
         final_error = validation_feedback or "Unknown generation error"
@@ -1932,7 +3020,16 @@ def init_command(
     count, task_dir, progress_path = _write_generated_artifacts(context, generated_plan)
     json_validation_errors: list[str] = []
     for task_path in sorted(task_dir.glob("*.json")):
-        json_validation_errors.extend(validate_task_file(task_path))
+        file_errors = validate_task_file(task_path)
+        json_validation_errors.extend(file_errors)
+        if file_errors:
+            continue
+        try:
+            task_doc = TaskJson.load(task_path)
+        except Exception as exc:  # noqa: BLE001
+            json_validation_errors.append(f"Task schema error in {task_path}: {exc}")
+            continue
+        json_validation_errors.extend(_validate_task_capability_ids(task_doc, config))
     if json_validation_errors:
         raise click.ClickException("\n".join(json_validation_errors))
     click.echo(f"Generated {count} task file(s) in {task_dir}")

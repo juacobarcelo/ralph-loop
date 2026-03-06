@@ -13,6 +13,69 @@ log_info()  { echo -e "${GREEN}[ralph]${NC} $*"; }
 log_warn()  { echo -e "${YELLOW}[ralph]${NC} $*"; }
 log_error() { echo -e "${RED}[ralph]${NC} $*" >&2; }
 
+get_docker_run_extra_args() {
+    local context="$1"
+    local engine="${2:-}"
+    local config_file="$CONFIG"
+
+    [[ -f "$config_file" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+
+    python3 - "$config_file" "$context" "$engine" <<'PY' 2>/dev/null || true
+import sys
+import yaml
+
+config_path = sys.argv[1]
+context = sys.argv[2]
+engine = sys.argv[3] if len(sys.argv) > 3 else ""
+
+try:
+    with open(config_path, "r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+except Exception:  # noqa: BLE001
+    sys.exit(0)
+
+if not isinstance(config, dict):
+    sys.exit(0)
+
+section = config.get("docker_run_args")
+if not isinstance(section, dict):
+    sys.exit(0)
+
+args: list[str] = []
+
+def add_items(items):
+    if not isinstance(items, list):
+        return
+    for item in items:
+        if isinstance(item, str):
+            normalized = item.strip()
+            if normalized:
+                args.append(normalized)
+
+add_items(section.get("default"))
+
+contexts = section.get("contexts")
+if isinstance(contexts, dict):
+    add_items(contexts.get(context))
+
+engines = section.get("engines")
+if isinstance(engines, dict) and engine:
+    add_items(engines.get(engine))
+
+deduped: list[str] = []
+seen: set[str] = set()
+for item in args:
+    if item in seen:
+        continue
+    seen.add(item)
+    deduped.append(item)
+
+for arg in deduped:
+    print(arg)
+PY
+}
+
 cleanup() {
     rm -rf "$RALPH_TMP"
     exit "${1:-0}"
@@ -38,7 +101,12 @@ ensure_image() {
 
     if [[ "$should_build" == "1" ]]; then
         log_info "Building $image ($reason)..."
-        docker build --target "$target" -t "$image" "$SCRIPT_DIR" --quiet
+        local build_args=(--target "$target" -t "$image")
+        if [[ "${RALPH_DOCKER_BUILD_QUIET:-0}" == "1" ]]; then
+            build_args+=(--quiet)
+        fi
+        build_args+=("$SCRIPT_DIR")
+        docker build "${build_args[@]}"
     fi
 }
 
@@ -84,13 +152,26 @@ image_is_stale() {
 }
 
 run_base() {
-    docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" ralph-loop-base "$@"
+    local docker_extra=()
+    mapfile -t docker_extra < <(get_docker_run_extra_args "base" "base")
+    docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" "${docker_extra[@]}" ralph-loop-base "$@"
 }
 
 run_cli() {
     local image="$1"; shift
     local auth_env=() auth_mount=()
     local container_home="/home/ralph"
+    local action="${1:-execute}"
+    local context="$action"
+    local engine="${image#ralph-loop-}"
+    local docker_extra=()
+
+    case "$action" in
+        execute) context="code" ;;
+        inspect) context="inspect" ;;
+    esac
+
+    mapfile -t docker_extra < <(get_docker_run_extra_args "$context" "$engine")
 
     while IFS= read -r env_var; do
         [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
@@ -108,13 +189,17 @@ run_cli() {
         fi
     done < <(jq -r '.auth.mount[]? // empty' "$RALPH_TMP/next-action.json")
 
-    docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
+    docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" "${docker_extra[@]}" "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
 }
 
 run_visual_cli() {
     local image="$1"; shift
     local auth_env=() auth_mount=()
     local container_home="/home/ralph"
+    local engine="${image#ralph-loop-}"
+    local docker_extra=()
+
+    mapfile -t docker_extra < <(get_docker_run_extra_args "visual" "$engine")
 
     while IFS= read -r env_var; do
         [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
@@ -135,6 +220,46 @@ run_visual_cli() {
     docker run --rm -u "$DOCKER_USER" \
         --add-host=host.docker.internal:host-gateway \
         -v "$PWD:/workspace" \
+        "${docker_extra[@]}" \
+        "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
+}
+
+run_review_cli() {
+    local image="$1"; shift
+    local auth_env=() auth_mount=()
+    local container_home="/home/ralph"
+    local review_tmp_host="$PWD/$RALPH_TMP/review"
+    local engine="${image#ralph-loop-}"
+    local docker_extra=()
+
+    mkdir -p "$review_tmp_host"
+
+    mapfile -t docker_extra < <(get_docker_run_extra_args "review" "$engine")
+
+    while IFS= read -r env_var; do
+        [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
+    done < <(jq -r '.auth.env[]? // empty' "$RALPH_TMP/next-action.json")
+
+    while IFS= read -r mount_path; do
+        expanded="${mount_path/#\~/$HOME}"
+        if [[ -d "$expanded" ]]; then
+            if [[ "$mount_path" == "~/"* ]]; then
+                container_target="${container_home}/${mount_path:2}"
+            else
+                container_target="$expanded"
+            fi
+            auth_mount+=("-v" "${expanded}:${container_target}")
+        fi
+    done < <(jq -r '.auth.mount[]? // empty' "$RALPH_TMP/next-action.json")
+
+    docker run --rm -u "$DOCKER_USER" \
+        --read-only \
+        --tmpfs /tmp \
+        --tmpfs /home/ralph/.cache \
+        --add-host=host.docker.internal:host-gateway \
+        -v "$PWD:/workspace:ro" \
+        -v "$review_tmp_host:/ralph-tmp" \
+        "${docker_extra[@]}" \
         "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
 }
 
@@ -169,6 +294,12 @@ run_cli_with_auth_file() {
     local auth_file="$1"; shift
     local auth_env=() auth_mount=()
     local container_home="/home/ralph"
+    local action="${1:-init}"
+    local context="$action"
+    local engine="${image#ralph-loop-}"
+    local docker_extra=()
+
+    mapfile -t docker_extra < <(get_docker_run_extra_args "$context" "$engine")
 
     while IFS= read -r env_var; do
         [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
@@ -186,7 +317,7 @@ run_cli_with_auth_file() {
         fi
     done < <(jq -r '.mount[]? // empty' "$auth_file")
 
-    docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
+    docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" "${docker_extra[@]}" "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
 }
 
 extract_init_backend_override() {
@@ -429,6 +560,50 @@ cmd_run() {
                 done < <(jq -r '.commands[]' "$RALPH_TMP/next-action.json")
                 jq -n --arg task "$TASK_ID" --argjson results "$RESULTS" '{step:"verify",task_id:$task,results:$results}' > "$RALPH_TMP/step-result.json"
                 ;;
+            runtime)
+                PHASE=$(jq -r '.phase // "unknown"' "$RALPH_TMP/next-action.json")
+                STEP_NAME="runtime_${PHASE}"
+                RUNTIME_COMMAND=$(jq -r '.runtime_command // empty' "$RALPH_TMP/next-action.json")
+                RUNTIME_TIMEOUT=$(jq -r '.timeout_seconds // 180' "$RALPH_TMP/next-action.json")
+                VERIFY_CWD_RAW=$(jq -r '.workspace_dir // "/workspace"' "$RALPH_TMP/next-action.json")
+                VERIFY_CWD=$(container_path_to_host_path "$VERIFY_CWD_RAW")
+
+                if [[ -z "$RUNTIME_COMMAND" ]]; then
+                    log_warn "Task $TASK_ID: no runtime command configured for phase $PHASE"
+                    jq -n --arg step "$STEP_NAME" --arg task "$TASK_ID" '{step:$step,task_id:$task,exit_code:0,stdout:"",stderr:"",runtime_command:""}' > "$RALPH_TMP/step-result.json"
+                    continue
+                fi
+
+                log_info "Task $TASK_ID: runtime $PHASE check on host..."
+                log_info "Task $TASK_ID: runtime cwd -> $VERIFY_CWD"
+                log_info "Task $TASK_ID: runtime command -> $RUNTIME_COMMAND"
+                RUNTIME_STDOUT_FILE="$RALPH_TMP/runtime-stdout.txt"
+                RUNTIME_STDERR_FILE="$RALPH_TMP/runtime-stderr.txt"
+                : > "$RUNTIME_STDOUT_FILE"
+                : > "$RUNTIME_STDERR_FILE"
+
+                set +e
+                (
+                    cd "$VERIFY_CWD"
+                    timeout "${RUNTIME_TIMEOUT}"s bash -lc "$RUNTIME_COMMAND"
+                ) > >(tee "$RUNTIME_STDOUT_FILE") \
+                  2> >(tee "$RUNTIME_STDERR_FILE" >&2)
+                EXIT_CODE=$?
+                set -e
+                STDOUT=$(cat "$RUNTIME_STDOUT_FILE")
+                STDERR=$(cat "$RUNTIME_STDERR_FILE")
+                log_info "Task $TASK_ID: runtime $PHASE finished (exit $EXIT_CODE)"
+                jq -n \
+                    --arg step "$STEP_NAME" \
+                    --arg task "$TASK_ID" \
+                    --arg phase "$PHASE" \
+                    --arg cmd "$RUNTIME_COMMAND" \
+                    --arg out "$STDOUT" \
+                    --arg err "$STDERR" \
+                    --argjson exit "$EXIT_CODE" \
+                    '{step:$step,task_id:$task,phase:$phase,runtime_command:$cmd,exit_code:$exit,stdout:$out,stderr:$err}' \
+                    > "$RALPH_TMP/step-result.json"
+                ;;
             inspect)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
                 build_backend_args
@@ -448,6 +623,27 @@ cmd_run() {
                 STDOUT=$(cat "$INSPECT_STDOUT_FILE")
                 log_info "Task $TASK_ID: inspect finished (exit $EXIT_CODE)"
                 jq -n --arg task "$TASK_ID" --argjson exit "$EXIT_CODE" --arg out "$STDOUT" '{step:"inspect",task_id:$task,exit_code:$exit,stdout:$out}' > "$RALPH_TMP/step-result.json"
+                ;;
+            review)
+                IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
+                build_backend_args
+                log_info "Task $TASK_ID: unified review via $IMAGE..."
+                REVIEW_STDOUT_FILE="$RALPH_TMP/review-stdout.txt"
+                REVIEW_STDERR_FILE="$RALPH_TMP/review-stderr.txt"
+                : > "$REVIEW_STDOUT_FILE"
+                : > "$REVIEW_STDERR_FILE"
+                set +e
+                run_review_cli "$IMAGE" review \
+                    --prompt-file "$(jq -r '.prompt_file' "$RALPH_TMP/next-action.json")" \
+                    "${BACKEND_ARGS[@]}" \
+                    > >(tee "$REVIEW_STDOUT_FILE") \
+                    2> >(tee "$REVIEW_STDERR_FILE" >&2)
+                EXIT_CODE=$?
+                set -e
+                STDOUT=$(cat "$REVIEW_STDOUT_FILE")
+                STDERR=$(cat "$REVIEW_STDERR_FILE")
+                log_info "Task $TASK_ID: review finished (exit $EXIT_CODE)"
+                jq -n --arg task "$TASK_ID" --argjson exit "$EXIT_CODE" --arg out "$STDOUT" --arg err "$STDERR" '{step:"review",task_id:$task,exit_code:$exit,stdout:$out,stderr:$err}' > "$RALPH_TMP/step-result.json"
                 ;;
             visual)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")

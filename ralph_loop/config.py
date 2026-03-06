@@ -128,6 +128,84 @@ class VisualVerifyConfig(BaseModel):
     teardown_commands: list[str] = Field(default_factory=list)
 
 
+class RuntimeGuardConfig(BaseModel):
+    """Configuration for one orchestrator-owned runtime guard command."""
+
+    command: str
+    timeout_seconds: int = 180
+    on_failure: str = "pause_loop"
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def _validate_timeout(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("runtime guard timeout_seconds must be >= 1")
+        return value
+
+    @field_validator("on_failure")
+    @classmethod
+    def _validate_on_failure(cls, value: str) -> str:
+        allowed = {"pause_loop", "abort_loop", "fail_attempt"}
+        if value not in allowed:
+            raise ValueError(f"runtime guard on_failure must be one of {sorted(allowed)}")
+        return value
+
+
+class RuntimeGuardsConfig(BaseModel):
+    """Runtime guard commands to run before and after coding."""
+
+    pre_code: RuntimeGuardConfig | None = None
+    post_code: RuntimeGuardConfig | None = None
+
+
+class DockerRunArgsConfig(BaseModel):
+    """Optional extra docker run args injected by wrapper context/engine."""
+
+    default: list[str] = Field(default_factory=list)
+    contexts: dict[str, list[str]] = Field(default_factory=dict)
+    engines: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class AgentCapabilityBackendFlags(BaseModel):
+    """Backend flags contributed by a capability per loop step."""
+
+    code: list[str] = Field(default_factory=list)
+    review: list[str] = Field(default_factory=list)
+
+
+class AgentCapabilityConfig(BaseModel):
+    """Declarative capability metadata available to coder/reviewer agents."""
+
+    type: str = "builtin"
+    instruction: str
+    check_command: str | None = None
+    backend_flags: dict[str, AgentCapabilityBackendFlags] = Field(default_factory=dict)
+
+    @field_validator("type")
+    @classmethod
+    def _validate_type(cls, value: str) -> str:
+        allowed = {"builtin", "mcp"}
+        if value not in allowed:
+            raise ValueError(f"capability type must be one of {sorted(allowed)}")
+        return value
+
+    @field_validator("instruction")
+    @classmethod
+    def _validate_instruction(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("capability instruction must be a non-empty string")
+        return normalized
+
+    @field_validator("check_command")
+    @classmethod
+    def _normalize_check_command(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
 class RalphConfig(BaseModel):
     """Root configuration loaded from YAML."""
 
@@ -136,17 +214,29 @@ class RalphConfig(BaseModel):
     max_retries: int = 3
     pause_file: str = "PAUSE.md"
     workspace_dir: str = "."
+    review_mode: str = "legacy"
 
     backends: dict[str, BackendConfig]
     verify_commands: list[str] = Field(default_factory=list)
     auth: dict[str, AuthConfig] = Field(default_factory=dict)
     project_instructions: str | None = None
+    runtime_guards: RuntimeGuardsConfig = Field(default_factory=RuntimeGuardsConfig)
+    docker_run_args: DockerRunArgsConfig = Field(default_factory=DockerRunArgsConfig)
+    agent_capabilities: dict[str, AgentCapabilityConfig] = Field(default_factory=dict)
 
     @field_validator("max_retries")
     @classmethod
     def _validate_max_retries(cls, value: int) -> int:
         if value < 1:
             raise ValueError("max_retries must be >= 1")
+        return value
+
+    @field_validator("review_mode")
+    @classmethod
+    def _validate_review_mode(cls, value: str) -> str:
+        allowed = {"legacy", "unified_agent"}
+        if value not in allowed:
+            raise ValueError(f"review_mode must be one of {sorted(allowed)}")
         return value
 
     @classmethod
@@ -215,3 +305,28 @@ class RalphConfig(BaseModel):
     def get_auth(self, engine: str) -> AuthConfig:
         """Get auth config for engine or return empty config."""
         return self.auth.get(engine, AuthConfig())
+
+    def get_reviewer_backend(self) -> BackendConfig:
+        """Resolve reviewer backend role with fallback for migration safety."""
+        for role in ("reviewer", "inspect", "inspector"):
+            if role in self.backends:
+                return self.backends[role]
+        raise KeyError("Backend role not configured: reviewer/inspect/inspector")
+
+    def get_capability(self, capability_id: str) -> AgentCapabilityConfig:
+        """Return one configured agent capability by ID."""
+        if capability_id not in self.agent_capabilities:
+            raise KeyError(f"Agent capability not configured: {capability_id}")
+        return self.agent_capabilities[capability_id]
+
+    def capability_backend_flags(self, capability_id: str, *, engine: str, step: str) -> list[str]:
+        """Return backend flags contributed by a capability for one step."""
+        capability = self.get_capability(capability_id)
+        backend = capability.backend_flags.get(engine)
+        if backend is None:
+            return []
+        if step == "code":
+            return backend.code
+        if step == "review":
+            return backend.review
+        raise ValueError(f"Unsupported capability step: {step}")

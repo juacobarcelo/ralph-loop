@@ -26,6 +26,16 @@ You can still provide any of these paths explicitly in YAML to override the conv
 - `auth` map (`codex`, `copilot`, `claude`) with:
   - `env`: list of env vars to forward in Docker mode
   - `mount`: list of host paths to mount inside backend containers
+- `docker_run_args` for flow-specific Docker runtime flags:
+  - `default`: applied to every `docker run`
+  - `contexts`: applied by wrapper context (`base`, `init`, `code`, `inspect`, `review`, `visual`)
+  - `engines`: applied by engine (`codex`, `copilot`, `claude`, `base`)
+- `agent_capabilities` for task-scoped tool declarations:
+  - keys are capability IDs referenced from task JSON (`agent_capabilities.code/review`)
+  - `type`: `builtin` or `mcp`
+  - `instruction`: short text injected into coder/reviewer prompts
+  - `check_command` (optional): host command that must succeed before invoking the agent step
+  - `backend_flags` (optional): engine-specific CLI flags appended per step (`code`, `review`)
 
 ## Config location
 
@@ -61,4 +71,25 @@ auth:
   copilot:
     env: []
     mount: ["~/.config/gh"]
+
+docker_run_args:
+  default: ["--network", "bridge"]
+  contexts:
+    visual: ["--cpus=1.0"]
+    review: ["--memory=2g"]
+  engines:
+    codex: ["--security-opt=no-new-privileges:true"]
+
+agent_capabilities:
+  chrome-devtools:
+    type: mcp
+    instruction: "Use Chrome MCP only when acceptance criteria require runtime/UI evidence."
+    check_command: "command -v google-chrome"
+    backend_flags:
+      codex:
+        code: ["--config", "mcp_servers.chrome-devtools=enabled"]
+        review: ["--config", "mcp_servers.chrome-devtools=enabled"]
+  playwright:
+    type: builtin
+    instruction: "Use Playwright scripts for deterministic UI checks when needed."
 ```

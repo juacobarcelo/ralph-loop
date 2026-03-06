@@ -9,7 +9,7 @@ def filter_feedback_for_coder(feedback_entries: list[FeedbackEntry]) -> list[Fee
     for entry in feedback_entries:
         sources = []
         for source in entry.sources:
-            if source.type in {"code", "ai_inspection"}:
+            if source.type in {"code", "ai_inspection", "review", "runtime_guard"}:
                 sources.append(source.model_copy(deep=True))
                 continue
             if source.type == "visual":

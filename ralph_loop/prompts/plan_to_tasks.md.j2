@@ -28,6 +28,10 @@ Schema:
             "setup_commands": ["string"],
             "teardown_commands": ["string"]
           } | null,
+          "agent_capabilities": {
+            "code": ["string"],
+            "review": ["string"]
+          },
           "files_to_touch": ["string"],
           "files_not_to_touch": ["string"],
           "constraints": ["string"],
@@ -42,18 +46,31 @@ Rules:
 - Create concrete, testable tasks.
 - Use 1+ phases and at least 1 task per phase.
 - Include `verify_commands` whenever the plan provides runnable checks.
+- Prefer repository-configured checks: inspect `./ralph-config.yaml` first and reuse `verify_commands` from it when present.
 - `verify_commands` run with working directory already set to the project `workspace_dir`.
 - Do not prefix `verify_commands` with `cd tmp/product` (or any `cd` to the workspace path).
 - Include `visual_verify` for tasks that explicitly require visual checks.
 - If visual verification should inspect only the current screenshot, set `visual_verify.reference` to `null`.
 - When `visual_verify.url` targets a local service (e.g., `http://localhost:PORT`), populate `setup_commands` with the commands needed to start that service (e.g., `docker compose up -d SERVICE`, `sleep 3`) and `teardown_commands` to stop it. These run on the host before and after the screenshot.
+- When the reviewer/visual runner is containerized, translate local URLs from `http://localhost:<port>` (or `127.0.0.1`) to `http://host.docker.internal:<port>` in `visual_verify.url`.
 - If the service is already guaranteed to be running externally, leave `setup_commands` and `teardown_commands` as empty arrays.
+- Keep exploration focused and minimal: inspect only files required to derive task structure and runnable commands (start with `ralph-config.yaml`, `docker-compose.yml`, `package.json`, and `scripts/ralph/*` if present). Avoid broad recursive repo scans unless a required value is missing.
+- Populate `agent_capabilities` only when a task needs explicit tools for `code` or `review`. Use capability IDs exactly as listed below; do not invent IDs.
 - If additional directives conflict with inferred hints, additional directives take precedence.
 - Output valid JSON with double quotes only.
 
 {% if project_instructions %}
 Project instructions:
 {{ project_instructions }}
+{% endif %}
+
+{% if available_capabilities %}
+Available capability IDs:
+{% for capability in available_capabilities %}
+- `{{ capability.id }}` ({{ capability.type }}):
+  - instruction: {{ capability.instruction }}
+  - supports steps: {% if capability.supports_code %}`code`{% endif %}{% if capability.supports_code and capability.supports_review %}, {% endif %}{% if capability.supports_review %}`review`{% endif %}
+{% endfor %}
 {% endif %}
 
 Source plan:

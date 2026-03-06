@@ -36,6 +36,13 @@
 {{ project_instructions }}
 {% endif %}
 
+{% if capabilities %}
+## Available Capabilities
+{% for capability in capabilities %}
+- `{{ capability.id }}` ({{ capability.type }}): {{ capability.instruction }}
+{% endfor %}
+{% endif %}
+
 {% if is_retry %}
 ## ⚠️ RETRY — Attempt {{ attempt_number }} of {{ max_retries }}
 
@@ -48,5 +55,6 @@ This task failed on previous attempts. Fix all issues from previous feedback bef
 1. Implement the task end-to-end for code changes only.
 2. Keep changes scoped to this task.
 3. You are part of the coding step only. Testing and verification are handled by separate ralph-loop stages/agents.
-4. During `code`, do not run tests or visual verification tooling (for example: `jest`, `tsc`, `playwright`, screenshot checks, or `visual_verify` commands).
-5. `verify_commands` are executed by the ralph-loop `verify` step on the host. During `code`, do not run host-only commands such as `docker` or `docker compose` from inside the coding container.
+4. Use only the capabilities explicitly listed above; if none are listed, do not assume MCP/browser tooling is available.
+5. During `code`, do not run tests or visual verification tooling (for example: `jest`, `tsc`, `playwright`, screenshot checks, or `visual_verify` commands).
+6. `verify_commands` are executed by the ralph-loop `verify` step on the host. During `code`, do not run host-only commands such as `docker` or `docker compose` from inside the coding container.

@@ -20,6 +20,271 @@ def test_get_auth_unknown_engine_returns_empty(sample_workspace: Path) -> None:
     assert auth == AuthConfig()
 
 
+def test_review_mode_defaults_to_legacy(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"backends": {"coder": {"engine": "codex"}}}),
+        encoding="utf-8",
+    )
+    config = RalphConfig.load(str(config_path))
+    assert config.review_mode == "legacy"
+
+
+def test_review_mode_validation_rejects_unknown_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "review_mode": "something_else",
+                "backends": {"coder": {"engine": "codex"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception):
+        RalphConfig.load(str(config_path))
+
+
+def test_runtime_guards_load_valid_configuration(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {"coder": {"engine": "codex"}},
+                "runtime_guards": {
+                    "pre_code": {
+                        "command": "./scripts/ralph/preflight.sh",
+                        "timeout_seconds": 120,
+                        "on_failure": "pause_loop",
+                    },
+                    "post_code": {
+                        "command": "./scripts/ralph/preflight.sh",
+                        "timeout_seconds": 180,
+                        "on_failure": "fail_attempt",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = RalphConfig.load(str(config_path))
+    assert config.runtime_guards.pre_code is not None
+    assert config.runtime_guards.pre_code.command == "./scripts/ralph/preflight.sh"
+    assert config.runtime_guards.pre_code.timeout_seconds == 120
+    assert config.runtime_guards.pre_code.on_failure == "pause_loop"
+    assert config.runtime_guards.post_code is not None
+    assert config.runtime_guards.post_code.on_failure == "fail_attempt"
+
+
+def test_runtime_guard_timeout_must_be_positive(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {"coder": {"engine": "codex"}},
+                "runtime_guards": {
+                    "pre_code": {
+                        "command": "echo ok",
+                        "timeout_seconds": 0,
+                        "on_failure": "pause_loop",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception):
+        RalphConfig.load(str(config_path))
+
+
+def test_runtime_guard_on_failure_validation(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {"coder": {"engine": "codex"}},
+                "runtime_guards": {
+                    "pre_code": {
+                        "command": "echo ok",
+                        "timeout_seconds": 10,
+                        "on_failure": "invalid_policy",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception):
+        RalphConfig.load(str(config_path))
+
+
+def test_docker_run_args_load_valid_configuration(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {"coder": {"engine": "codex"}},
+                "docker_run_args": {
+                    "default": ["--network", "bridge"],
+                    "contexts": {
+                        "visual": ["--cap-add=SYS_ADMIN"],
+                        "review": ["--cpus=1.0"],
+                    },
+                    "engines": {"codex": ["--memory=2g"]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = RalphConfig.load(str(config_path))
+
+    assert config.docker_run_args.default == ["--network", "bridge"]
+    assert config.docker_run_args.contexts["visual"] == ["--cap-add=SYS_ADMIN"]
+    assert config.docker_run_args.contexts["review"] == ["--cpus=1.0"]
+    assert config.docker_run_args.engines["codex"] == ["--memory=2g"]
+
+
+def test_docker_run_args_defaults_to_empty(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"backends": {"coder": {"engine": "codex"}}}),
+        encoding="utf-8",
+    )
+
+    config = RalphConfig.load(str(config_path))
+
+    assert config.docker_run_args.default == []
+    assert config.docker_run_args.contexts == {}
+    assert config.docker_run_args.engines == {}
+
+
+def test_agent_capabilities_load_and_resolve_backend_flags(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {
+                    "coder": {"engine": "codex"},
+                    "reviewer": {"engine": "codex"},
+                },
+                "agent_capabilities": {
+                    "chrome-devtools": {
+                        "type": "mcp",
+                        "instruction": "Use Chrome MCP for visual checks when needed.",
+                        "check_command": "command -v google-chrome",
+                        "backend_flags": {
+                            "codex": {
+                                "code": ["--config", "mcp_servers.chrome-devtools=enabled"],
+                                "review": ["--config", "mcp_servers.chrome-devtools=enabled"],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = RalphConfig.load(str(config_path))
+
+    capability = config.get_capability("chrome-devtools")
+    assert capability.type == "mcp"
+    assert capability.check_command == "command -v google-chrome"
+    assert config.capability_backend_flags(
+        "chrome-devtools",
+        engine="codex",
+        step="code",
+    ) == ["--config", "mcp_servers.chrome-devtools=enabled"]
+    assert config.capability_backend_flags(
+        "chrome-devtools",
+        engine="codex",
+        step="review",
+    ) == ["--config", "mcp_servers.chrome-devtools=enabled"]
+
+
+def test_agent_capabilities_reject_unknown_type(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {"coder": {"engine": "codex"}},
+                "agent_capabilities": {
+                    "playwright": {
+                        "type": "browser",
+                        "instruction": "Use Playwright for UI assertions.",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception):
+        RalphConfig.load(str(config_path))
+
+
+def test_get_reviewer_backend_resolution_order(tmp_path: Path) -> None:
+    reviewer_config = tmp_path / "reviewer.yaml"
+    reviewer_config.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {
+                    "coder": {"engine": "codex"},
+                    "reviewer": {"engine": "codex", "model": "gpt-5.4-codex"},
+                    "inspect": {"engine": "copilot", "model": "claude-opus"},
+                    "inspector": {"engine": "copilot", "model": "claude-sonnet"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = RalphConfig.load(str(reviewer_config))
+    assert config.get_reviewer_backend().model == "gpt-5.4-codex"
+
+    inspect_config = tmp_path / "inspect.yaml"
+    inspect_config.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {
+                    "coder": {"engine": "codex"},
+                    "inspect": {"engine": "copilot", "model": "claude-opus"},
+                    "inspector": {"engine": "copilot", "model": "claude-sonnet"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = RalphConfig.load(str(inspect_config))
+    assert config.get_reviewer_backend().model == "claude-opus"
+
+    inspector_config = tmp_path / "inspector.yaml"
+    inspector_config.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {
+                    "coder": {"engine": "codex"},
+                    "inspector": {"engine": "copilot", "model": "claude-sonnet"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = RalphConfig.load(str(inspector_config))
+    assert config.get_reviewer_backend().model == "claude-sonnet"
+
+
+def test_get_reviewer_backend_raises_when_missing(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"backends": {"coder": {"engine": "codex"}}}),
+        encoding="utf-8",
+    )
+    config = RalphConfig.load(str(config_path))
+    with pytest.raises(KeyError):
+        config.get_reviewer_backend()
+
+
 def test_load_missing_file_raises() -> None:
     with pytest.raises(FileNotFoundError):
         RalphConfig.load("missing.yaml")

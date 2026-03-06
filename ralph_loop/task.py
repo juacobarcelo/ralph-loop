@@ -58,6 +58,13 @@ class InspectSection(BaseModel):
     description_summary: str = ""
 
 
+class AgentCapabilitiesSection(BaseModel):
+    """Task-level capability IDs to expose to each agent step."""
+
+    code: list[str] = Field(default_factory=list)
+    review: list[str] = Field(default_factory=list)
+
+
 class TaskJson(BaseModel):
     """Single-file JSON task contract with stage-scoped sections."""
 
@@ -69,6 +76,7 @@ class TaskJson(BaseModel):
     verify: VerifySection = Field(default_factory=VerifySection)
     visual: VisualSection | None = None
     inspect: InspectSection = Field(default_factory=InspectSection)
+    agent_capabilities: AgentCapabilitiesSection = Field(default_factory=AgentCapabilitiesSection)
 
     @classmethod
     def load(cls, path: str | Path) -> TaskJson:

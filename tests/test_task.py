@@ -111,6 +111,10 @@ def test_task_json_load_and_validate(tmp_path: Path) -> None:
             "acceptance_criteria": ["Returns 200"],
             "description_summary": "Implement endpoint",
         },
+        "agent_capabilities": {
+            "code": ["playwright"],
+            "review": ["chrome-devtools"],
+        },
     }
     task_file.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -118,6 +122,8 @@ def test_task_json_load_and_validate(tmp_path: Path) -> None:
     assert task.title == "Sample JSON Task"
     assert task.verify.commands == ["pytest tests/test_api.py"]
     assert task.visual_verify is not None
+    assert task.agent_capabilities.code == ["playwright"]
+    assert task.agent_capabilities.review == ["chrome-devtools"]
     assert validate_task_file(task_file) == []
 
 

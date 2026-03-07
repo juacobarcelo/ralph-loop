@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -424,6 +425,68 @@ def _validate_task_capability_ids(task_doc: TaskJson, config: RalphConfig) -> li
                     f"Task {task_doc.id} references undefined capability "
                     f"`{capability_id}` in `agent_capabilities.{step}`"
                 )
+    return errors
+
+
+_DISALLOWED_VERIFY_COMMAND_PATTERNS = (
+    r"\bdocker(?:\s+compose)?\s+(?:up|down|start|stop|restart|kill)\b",
+    r"\bdocker-compose\s+(?:up|down|start|stop|restart|kill)\b",
+    r"\bkubectl\s+(?:apply|delete|rollout|scale|run)\b",
+    r"\bsleep\s+\d+\b",
+    r"\b(?:npm|pnpm|yarn)\s+(?:dev|start)\b",
+    r"\bnext\s+dev\b",
+    r"\buvicorn\b",
+    r"\bpython(?:3)?\s+-m\s+http\.server\b",
+    r"\b(?:pkill|killall|kill)\b",
+    r"\bcurl\b[^\n]*\s-X\s+(?:POST|PUT|PATCH|DELETE)\b",
+    r"\bwget\b[^\n]*\s+--method=(?:POST|PUT|PATCH|DELETE)\b",
+)
+
+
+def _command_uses_disallowed_verify_behavior(command: str) -> bool:
+    lowered = command.lower()
+    return any(re.search(pattern, lowered) for pattern in _DISALLOWED_VERIFY_COMMAND_PATTERNS)
+
+
+def _validate_task_semantics(
+    task_doc: TaskJson,
+    config: RalphConfig,
+    *,
+    source_label: str | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    label = source_label or f"Task {task_doc.id}"
+
+    for command in task_doc.verify.commands:
+        if _command_uses_disallowed_verify_behavior(command):
+            errors.append(
+                f"{label}: verify.commands must stay host-side and non-destructive: {command}"
+            )
+
+    review_focus = task_doc.review.focus
+    review_service_urls = task_doc.review.service_urls
+    review_runtime_expectations = task_doc.review.runtime_expectations
+    requires_runtime_review = any(
+        (review_focus, review_service_urls, review_runtime_expectations)
+    )
+    if requires_runtime_review and not task_doc.agent_capabilities.review:
+        errors.append(
+            f"{label}: runtime/service/browser review requires at least one "
+            "capability in agent_capabilities.review"
+        )
+
+    for url in review_service_urls:
+        lowered = url.lower()
+        if "localhost" in lowered or "127.0.0.1" in lowered:
+            errors.append(
+                f"{label}: review.service_urls must use host.docker.internal for "
+                f"dockerized runs: {url}"
+            )
+
+    if config.review_mode == "unified_agent" and task_doc.visual is not None:
+        errors.append(f"{label}: legacy visual block is not allowed in unified_agent loops")
+
+    errors.extend(_validate_task_capability_ids(task_doc, config))
     return errors
 
 
@@ -1123,18 +1186,19 @@ def _derive_loop_dir_from_source(source: Path) -> Path:
     return source.parent / ".ralph-loop"
 
 
-_DEFAULT_GUARD_COMMAND = "./scripts/ralph/guard.sh"
-_DEFAULT_GUARD_RELATIVE_PATH = Path("scripts/ralph/guard.sh")
-_DEFAULT_VERIFY_FILE_RELATIVE_PATH = Path("scripts/ralph/verify-commands.txt")
+_DEFAULT_PRE_GUARD_COMMAND = "./.ralph-loop/guard.sh pre"
+_DEFAULT_POST_GUARD_COMMAND = "./.ralph-loop/guard.sh post"
+_DEFAULT_GUARD_RELATIVE_PATH = Path(".ralph-loop/guard.sh")
+_DEFAULT_VERIFY_FILE_RELATIVE_PATH = Path(".ralph-loop/verify-commands.txt")
 _DEFAULT_VERIFY_COMMAND = "docker compose exec videntus-dev-server pnpm exec tsc --noEmit"
 _DEFAULT_GUARD_SCRIPT = """#!/usr/bin/env bash
 set -euo pipefail
 
-MODE="${1:-full}"
+MODE="${1:-pre}"
 PROJECT_URL="${PROJECT_URL:-http://localhost:3001}"
 SERVICE_NAME="${SERVICE_NAME:-videntus-dev-server}"
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-45}"
-VERIFY_FILE="${VERIFY_FILE:-scripts/ralph/verify-commands.txt}"
+VERIFY_FILE="${VERIFY_FILE:-.ralph-loop/verify-commands.txt}"
 
 run_service_checks() {
   docker compose up -d "$SERVICE_NAME" >/dev/null
@@ -1172,17 +1236,17 @@ run_verify_checks() {
 }
 
 case "$MODE" in
-  full)
+  pre)
     run_service_checks
     run_verify_checks
     exit 0
     ;;
-  verify-only)
+  post)
     run_verify_checks
     exit 0
     ;;
   *)
-    echo "guard failed: invalid mode '$MODE' (expected: full|verify-only)" >&2
+    echo "guard failed: invalid mode '$MODE' (expected: pre|post)" >&2
     exit 2
     ;;
 esac
@@ -1230,6 +1294,7 @@ def _default_reviewer_backend(backends: dict[str, Any]) -> dict[str, Any]:
 def _normalize_runtime_guard(
     raw: Any,
     *,
+    default_command: str,
     default_on_failure: str,
 ) -> tuple[dict[str, Any], bool]:
     changed = False
@@ -1242,7 +1307,7 @@ def _normalize_runtime_guard(
 
     command = guard.get("command")
     if not isinstance(command, str) or not command.strip():
-        guard["command"] = _DEFAULT_GUARD_COMMAND
+        guard["command"] = default_command
         changed = True
 
     timeout_seconds = guard.get("timeout_seconds")
@@ -1332,10 +1397,31 @@ def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
         raw_payload["backends"] = backends
         changed = True
 
+    init_backend = _normalized_backend_for_reviewer(backends.get("init"))
+    if init_backend is None:
+        init_backend = _normalized_backend_for_reviewer(backends.get("initialize"))
+    if init_backend is None:
+        init_backend = _normalized_backend_for_reviewer(backends.get("coder"))
+    if init_backend is None:
+        init_backend = {
+            "engine": "codex",
+            "model": "gpt-5.4-codex",
+            "timeout_seconds": 600,
+            "extra_flags": [],
+        }
+    if backends.get("init") != init_backend:
+        backends["init"] = init_backend
+        changed = True
+
     reviewer = _normalized_backend_for_reviewer(backends.get("reviewer"))
     if reviewer is None:
         backends["reviewer"] = _default_reviewer_backend(backends)
         changed = True
+
+    for stale_role in ("initialize", "inspector", "inspect", "visual"):
+        if stale_role in backends:
+            backends.pop(stale_role, None)
+            changed = True
 
     runtime_guards = raw_payload.get("runtime_guards")
     if not isinstance(runtime_guards, dict):
@@ -1345,6 +1431,7 @@ def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
 
     pre_code, pre_changed = _normalize_runtime_guard(
         runtime_guards.get("pre_code"),
+        default_command=_DEFAULT_PRE_GUARD_COMMAND,
         default_on_failure="pause_loop",
     )
     runtime_guards["pre_code"] = pre_code
@@ -1352,13 +1439,14 @@ def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
 
     post_code, post_changed = _normalize_runtime_guard(
         runtime_guards.get("post_code"),
+        default_command=_DEFAULT_POST_GUARD_COMMAND,
         default_on_failure="fail_attempt",
     )
     runtime_guards["post_code"] = post_code
     changed = changed or post_changed
 
     if "verify_commands" not in raw_payload or not isinstance(raw_payload.get("verify_commands"), list):
-        raw_payload["verify_commands"] = [_DEFAULT_VERIFY_COMMAND]
+        raw_payload["verify_commands"] = []
         changed = True
 
     if changed or not config_path.exists():
@@ -1470,6 +1558,20 @@ def _extract_verify_command_hint(source_text: str) -> str | None:
     return None
 
 
+def _dockerize_local_service_url(url: str) -> str:
+    normalized = url.strip()
+    replacements = {
+        "http://localhost:": "http://host.docker.internal:",
+        "http://127.0.0.1:": "http://host.docker.internal:",
+        "https://localhost:": "https://host.docker.internal:",
+        "https://127.0.0.1:": "https://host.docker.internal:",
+    }
+    for source, target in replacements.items():
+        if normalized.lower().startswith(source):
+            return target + normalized[len(source) :]
+    return normalized
+
+
 def _extract_review_context_hint(source_text: str) -> dict[str, list[str]] | None:
     lowered = source_text.lower()
     if not _contains_runtime_review_instruction(source_text):
@@ -1485,7 +1587,7 @@ def _extract_review_context_hint(source_text: str) -> dict[str, list[str]] | Non
         source_text,
         flags=re.IGNORECASE,
     )
-    service_urls = _dedupe_strings(url_matches)
+    service_urls = _dedupe_strings([_dockerize_local_service_url(url) for url in url_matches])
     runtime_expectations: list[str] = []
     focus: list[str] = []
 
@@ -1672,7 +1774,14 @@ def _select_visual_target(
     return tasks[-1] if prefer_last else tasks[0]
 
 
-def _build_prompt(source_content: str, config: RalphConfig, user_directives: str = "") -> str:
+def _build_prompt(
+    source_content: str,
+    config: RalphConfig,
+    *,
+    plan_output_path: Path,
+    plan_validation_command: str,
+    user_directives: str = "",
+) -> str:
     project_instructions = ""
     if config.project_instructions:
         instructions_path = Path(config.project_instructions)
@@ -1702,6 +1811,8 @@ def _build_prompt(source_content: str, config: RalphConfig, user_directives: str
         project_instructions=project_instructions,
         user_directives=user_directives,
         available_capabilities=available_capabilities,
+        plan_output_path=str(plan_output_path),
+        plan_validation_command=plan_validation_command,
     )
 
 
@@ -1753,6 +1864,7 @@ def _generate_plan_with_backend(
     *,
     config: RalphConfig,
     prompt: str,
+    plan_output_path: Path,
     backend_override: str | None,
     model_override: str | None,
     validation_feedback: str | None = None,
@@ -1771,7 +1883,19 @@ def _generate_plan_with_backend(
             f"{prompt}\n\n"
             "## Validation Errors\n"
             f"{validation_feedback.strip()}\n\n"
-            "Fix these errors and regenerate the complete plan as strict JSON."
+            "Fix these errors, rewrite the complete generated plan file, and rerun the "
+            "validation command."
+        )
+
+    try:
+        plan_output_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_output_path.write_text("", encoding="utf-8")
+    except OSError:
+        return (
+            None,
+            f"Could not reset generated plan output file: {plan_output_path}",
+            None,
+            prompt_with_feedback,
         )
 
     try:
@@ -1790,14 +1914,11 @@ def _generate_plan_with_backend(
         return None, details, result, prompt_with_feedback
 
     try:
-        payload = _extract_first_json_object(result.stdout)
-    except (ValueError, json.JSONDecodeError) as exc:
-        return None, f"Invalid JSON: {exc}", result, prompt_with_feedback
-
-    try:
-        return GeneratedPlan.model_validate(payload), None, result, prompt_with_feedback
+        generated_plan = _load_generated_plan_from_file(plan_output_path)
     except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-        return None, f"Plan schema validation failed: {exc}", result, prompt_with_feedback
+        return None, f"Generated plan file is invalid: {exc}", result, prompt_with_feedback
+
+    return generated_plan, None, result, prompt_with_feedback
 
 
 def _truncate_for_log(text: str, max_chars: int = 1200) -> str:
@@ -1904,6 +2025,255 @@ def _write_generated_artifacts(ctx: _InitContext, plan: GeneratedPlan) -> tuple[
     return task_counter, task_dir, progress_path
 
 
+def _load_yaml_mapping(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _collect_validate_errors(config: RalphConfig, progress: Progress) -> list[str]:
+    task_dir = Path(config.task_dir)
+    progress_task_files: set[Path] = set()
+    missing_in_progress: list[str] = []
+
+    for phase in progress.phases:
+        for task in phase.tasks:
+            resolved = _resolve_task_file_path(task.task_file, config)
+            if resolved is None:
+                missing_in_progress.append(task.task_file)
+                continue
+            progress_task_files.add(resolved)
+
+    if not task_dir.exists():
+        return [f"Task directory does not exist: {task_dir}"]
+
+    task_files_on_disk = {
+        path.resolve() for pattern in ("*.md", "*.json") for path in task_dir.glob(pattern)
+    }
+    if missing_in_progress:
+        return [f"Task files referenced in progress are missing: {missing_in_progress}"]
+
+    validation_errors: list[str] = []
+    for task_path in sorted(progress_task_files):
+        if task_path.suffix.lower() != ".json":
+            continue
+        json_errors = validate_task_file(task_path)
+        validation_errors.extend(json_errors)
+        if json_errors:
+            continue
+        try:
+            task_doc = TaskJson.load(task_path)
+        except Exception as exc:  # noqa: BLE001
+            validation_errors.append(f"Task schema error in {task_path}: {exc}")
+            continue
+        validation_errors.extend(_validate_task_semantics(task_doc, config, source_label=str(task_path)))
+
+    not_referenced = [
+        path for path in sorted(task_files_on_disk) if path not in progress_task_files
+    ]
+    if not_referenced:
+        validation_errors.append(f"Task files not referenced in progress: {not_referenced}")
+
+    known_engines = {"codex", "copilot", "claude"}
+    unknown = sorted({backend.engine for backend in config.backends.values()} - known_engines)
+    if unknown:
+        validation_errors.append(f"Unknown backend engines: {unknown}")
+
+    for engine in {backend.engine for backend in config.backends.values()}:
+        _ = config.get_auth(engine)
+
+    return validation_errors
+
+
+def _collect_loop_check_errors(
+    *,
+    config_path: Path,
+    loop_dir: Path,
+    config: RalphConfig,
+    progress: Progress,
+) -> list[str]:
+    raw_config = _load_yaml_mapping(config_path)
+    errors: list[str] = []
+
+    if not config_path.exists():
+        errors.append(f"config file not found: {config_path}")
+    if not Path(config.progress_file).exists():
+        errors.append(f"missing PROGRESS.yaml: {config.progress_file}")
+    if not Path(config.task_dir).exists():
+        errors.append(f"missing task dir: {config.task_dir}")
+    elif not any(Path(config.task_dir).glob("*.json")):
+        errors.append(f"tasks directory has no JSON task files: {config.task_dir}")
+
+    if config.review_mode == "unified_agent":
+        if raw_config.get("verify_commands") != []:
+            errors.append(
+                "config.verify_commands should be [] for unified_agent loops; "
+                "checks belong in runtime guards"
+            )
+
+        backends = raw_config.get("backends")
+        if not isinstance(backends, dict):
+            errors.append("config.backends missing or invalid")
+        else:
+            missing_backends = [name for name in ("init", "coder", "reviewer") if name not in backends]
+            if missing_backends:
+                errors.append(
+                    "config.backends missing required entries for unified_agent: "
+                    + ", ".join(missing_backends)
+                )
+            extra_backends = sorted(set(backends.keys()) - {"init", "coder", "reviewer"})
+            if extra_backends:
+                errors.append(
+                    "config.backends contains deprecated/unsupported entries for unified_agent: "
+                    + ", ".join(extra_backends)
+                )
+
+        runtime_guards = raw_config.get("runtime_guards")
+        if not isinstance(runtime_guards, dict):
+            errors.append("config.runtime_guards missing or invalid")
+        else:
+            for phase_name in ("pre_code", "post_code"):
+                phase_cfg = runtime_guards.get(phase_name)
+                if not isinstance(phase_cfg, dict):
+                    errors.append(f"config.runtime_guards.{phase_name} missing or invalid")
+                    continue
+                command = phase_cfg.get("command")
+                if not isinstance(command, str) or not command.strip():
+                    errors.append(f"config.runtime_guards.{phase_name}.command must be non-empty")
+
+        guard_path = loop_dir / "guard.sh"
+        runtime_guard_commands = [
+            str(runtime_guard.get("command", ""))
+            for runtime_guard in (raw_config.get("runtime_guards") or {}).values()
+            if isinstance(raw_config.get("runtime_guards"), dict) and isinstance(runtime_guard, dict)
+        ]
+        loop_local_guard_referenced = any(
+            "../guard.sh" in command
+            or re.search(r"(^|[\"'\s])(?:\./)?guard\.sh(?:[\s\"']|$)", command)
+            for command in runtime_guard_commands
+        )
+        if loop_local_guard_referenced and (not guard_path.exists() or not os.access(guard_path, os.X_OK)):
+            errors.append(f"loop-local guard script must exist and be executable: {guard_path}")
+
+    docker_run_args = raw_config.get("docker_run_args")
+    contexts = {}
+    if docker_run_args is not None:
+        if not isinstance(docker_run_args, dict):
+            errors.append("config.docker_run_args must be a mapping when present")
+        else:
+            contexts = docker_run_args.get("contexts", {})
+            if contexts and not isinstance(contexts, dict):
+                errors.append("config.docker_run_args.contexts must be a mapping")
+                contexts = {}
+
+    flow_runtime = raw_config.get("flow_runtime")
+    if isinstance(flow_runtime, dict):
+        reference_codebases = flow_runtime.get("reference_codebases", [])
+        if reference_codebases and not isinstance(reference_codebases, list):
+            errors.append("config.flow_runtime.reference_codebases must be a list")
+        elif isinstance(reference_codebases, list):
+            for reference in reference_codebases:
+                if not isinstance(reference, dict):
+                    errors.append("reference_codebase entries must be mappings")
+                    continue
+                reference_id = str(reference.get("id", "")).strip()
+                host_path = str(reference.get("host_path", "")).strip()
+                container_path = str(reference.get("container_path", "")).strip()
+                mode = str(reference.get("mode", "")).strip()
+                if not reference_id or not host_path or not container_path:
+                    errors.append(f"reference_codebase is incomplete: {reference}")
+                    continue
+                if mode != "ro":
+                    errors.append(
+                        f"reference_codebase.mode must be 'ro' for read-only access: {reference_id}"
+                    )
+                mount_value = f"{host_path}:{container_path}:ro"
+                for context_name in ("init", "code", "review"):
+                    values = contexts.get(context_name, [])
+                    if not isinstance(values, list) or mount_value not in values:
+                        errors.append(
+                            "config.docker_run_args.contexts."
+                            f"{context_name} must mount read-only reference '{mount_value}'"
+                        )
+
+    agent_capabilities = raw_config.get("agent_capabilities")
+    if agent_capabilities is not None and not isinstance(agent_capabilities, dict):
+        errors.append("config.agent_capabilities must be a mapping when present")
+
+    for phase in progress.phases:
+        for task in phase.tasks:
+            task_path = _resolve_task_file_path(task.task_file, config)
+            if task_path is None or task_path.suffix.lower() != ".json":
+                continue
+            try:
+                task_doc = TaskJson.load(task_path)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"invalid JSON task file: {task_path} ({exc})")
+                continue
+            errors.extend(_validate_task_semantics(task_doc, config, source_label=str(task_path)))
+
+    return errors
+
+
+def _validate_generated_plan_semantics(plan: GeneratedPlan, config: RalphConfig) -> list[str]:
+    errors: list[str] = []
+    task_counter = 0
+    for phase_index, phase in enumerate(plan.phases, start=1):
+        for task in phase.tasks:
+            task_counter += 1
+            task_id = f"{task_counter:02d}"
+            try:
+                task_doc = task.to_task_json(phase_id=phase_index, task_id=task_id)
+            except ValidationError as exc:
+                errors.append(f"Task {task_id}: {exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Task {task_id}: {exc}")
+                continue
+            errors.extend(_validate_task_semantics(task_doc, config, source_label=f"Task {task_id}"))
+    return errors
+
+
+def _resolve_plan_output_path(
+    *,
+    config: RalphConfig,
+    runtime_paths: _Paths,
+    plan_output_file: Path | None,
+) -> Path:
+    candidate = plan_output_file or (runtime_paths.tmp_dir / "generated-plan.json")
+    return candidate.expanduser().resolve()
+
+
+def _build_plan_validation_command(plan_output_path: Path, config_path: Path) -> str:
+    return " ".join(
+        [
+            shlex.quote(sys.executable),
+            "-m",
+            "ralph_loop",
+            "validate-plan",
+            "--config",
+            shlex.quote(str(config_path)),
+            "--plan-file",
+            shlex.quote(str(plan_output_path)),
+        ]
+    )
+
+
+def _load_generated_plan_from_file(plan_output_path: Path) -> GeneratedPlan:
+    if not plan_output_path.exists():
+        raise ValueError(f"Plan output file was not created: {plan_output_path}")
+    try:
+        payload = json.loads(plan_output_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Plan output file does not contain valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Plan output file root must be an object: {plan_output_path}")
+    return GeneratedPlan.model_validate(payload)
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def main() -> None:
     """ralph-loop command line interface."""
@@ -1981,63 +2351,48 @@ def auth_config_command(engine: str, config_path: str) -> None:
 def validate_command(config_path: str, loop_dir: str) -> None:
     """Validate consistency between config, progress, and task files."""
     config, progress = _load_config_and_progress(config_path, loop_dir)
-
-    task_dir = Path(config.task_dir)
-    progress_task_files: set[Path] = set()
-    missing_in_progress: list[str] = []
-
-    for phase in progress.phases:
-        for task in phase.tasks:
-            resolved = _resolve_task_file_path(task.task_file, config)
-            if resolved is None:
-                missing_in_progress.append(task.task_file)
-                continue
-            progress_task_files.add(resolved)
-
-    if not task_dir.exists():
-        raise click.ClickException(f"Task directory does not exist: {task_dir}")
-
-    task_files_on_disk = {
-        path.resolve() for pattern in ("*.md", "*.json") for path in task_dir.glob(pattern)
-    }
-    if missing_in_progress:
-        raise click.ClickException(
-            f"Task files referenced in progress are missing: {missing_in_progress}"
-        )
-
-    validation_errors: list[str] = []
-    for task_path in sorted(progress_task_files):
-        if task_path.suffix.lower() != ".json":
-            continue
-        json_errors = validate_task_file(task_path)
-        validation_errors.extend(json_errors)
-        if json_errors:
-            continue
-        try:
-            task_doc = TaskJson.load(task_path)
-        except Exception as exc:  # noqa: BLE001
-            validation_errors.append(f"Task schema error in {task_path}: {exc}")
-            continue
-        validation_errors.extend(_validate_task_capability_ids(task_doc, config))
-
+    validation_errors = _collect_validate_errors(config, progress)
     if validation_errors:
         raise click.ClickException("\n".join(validation_errors))
 
-    not_referenced = [
-        path for path in sorted(task_files_on_disk) if path not in progress_task_files
-    ]
-    if not_referenced:
-        raise click.ClickException(f"Task files not referenced in progress: {not_referenced}")
-
-    known_engines = {"codex", "copilot", "claude"}
-    unknown = sorted({backend.engine for backend in config.backends.values()} - known_engines)
-    if unknown:
-        raise click.ClickException(f"Unknown backend engines: {unknown}")
-
-    for engine in {backend.engine for backend in config.backends.values()}:
-        _ = config.get_auth(engine)
-
     click.echo("Validation passed.")
+
+
+@main.command("check")
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+@click.option("--loop-dir", default=".", show_default=True)
+def check_command(config_path: str, loop_dir: str) -> None:
+    """Run semantic checks on a generated ralph-loop."""
+    config, progress = _load_config_and_progress(config_path, loop_dir)
+    validation_errors = _collect_validate_errors(config, progress)
+    check_errors = _collect_loop_check_errors(
+        config_path=Path(config_path).expanduser().resolve(),
+        loop_dir=Path(loop_dir).expanduser().resolve(),
+        config=config,
+        progress=progress,
+    )
+    errors = [*validation_errors, *check_errors]
+    if errors:
+        raise click.ClickException("\n".join(errors))
+    click.echo("Loop checks passed.")
+
+
+@main.command("validate-plan")
+@click.option("--plan-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--config", "config_path", default=_default_config_path, show_default="auto")
+def validate_plan_command(plan_file: Path, config_path: str) -> None:
+    """Validate an init-generated plan JSON before writing loop artifacts."""
+    config = _load_config(config_path)
+    try:
+        plan = _load_generated_plan_from_file(plan_file)
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    errors = _validate_generated_plan_tasks(plan)
+    errors.extend(_validate_generated_plan_semantics(plan, config))
+    if errors:
+        raise click.ClickException("\n".join(errors))
+    click.echo("Plan validation passed.")
 
 
 @main.command("next-action")
@@ -2939,6 +3294,12 @@ def recover_command(config_path: str, loop_dir: str, task_id: str) -> None:
     required=False,
     help="Path to a file containing additional directives.",
 )
+@click.option(
+    "--plan-output-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    required=False,
+    help="Path where init should ask the backend to write generated-plan.json.",
+)
 @click.option("--config", "config_path", default=_default_config_path, show_default="auto")
 def init_command(
     source_path: str,
@@ -2946,6 +3307,7 @@ def init_command(
     model: str | None,
     instructions: str | None,
     instructions_file: Path | None,
+    plan_output_file: Path | None,
     config_path: str,
 ) -> None:
     """Generate tasks and progress from a plan document."""
@@ -2962,13 +3324,30 @@ def init_command(
     _ensure_init_directories(config)
     runtime_paths = _runtime_paths(config)
     runtime_paths.tmp_dir.mkdir(parents=True, exist_ok=True)
+    resolved_plan_output_path = _resolve_plan_output_path(
+        config=config,
+        runtime_paths=runtime_paths,
+        plan_output_file=plan_output_file,
+    )
+    resolved_plan_output_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_config_path = config_file.expanduser().resolve()
 
     click.echo(f"[init] Reading source design: {source}")
     source_content = source.read_text(encoding="utf-8")
     user_directives = _load_user_directives(instructions, instructions_file)
     if user_directives:
         click.echo("[init] Applying additional user directives.")
-    prompt = _build_prompt(source_content, config, user_directives)
+    click.echo(f"[init] Generated plan output file: {resolved_plan_output_path}")
+    prompt = _build_prompt(
+        source_content,
+        config,
+        plan_output_path=resolved_plan_output_path,
+        plan_validation_command=_build_plan_validation_command(
+            resolved_plan_output_path,
+            resolved_config_path,
+        ),
+        user_directives=user_directives,
+    )
 
     role_backend = _select_init_backend(config)
     selected_engine = backend or role_backend.engine
@@ -2993,6 +3372,7 @@ def init_command(
                 _generate_plan_with_backend(
                     config=config,
                     prompt=prompt,
+                    plan_output_path=resolved_plan_output_path,
                     backend_override=backend,
                     model_override=model,
                     validation_feedback=validation_feedback,
@@ -3043,6 +3423,7 @@ def init_command(
                 f"{source_content}\n\n{user_directives}",
             )
             task_errors = _validate_generated_plan_tasks(candidate_plan)
+            task_errors.extend(_validate_generated_plan_semantics(candidate_plan, config))
             if task_errors:
                 validation_feedback = "\n".join(task_errors)
                 click.echo(f"[init] Attempt {attempt}/{attempts} failed task schema validation.")
@@ -3071,19 +3452,16 @@ def init_command(
 
     click.echo("[init] Writing tasks and progress files...")
     count, task_dir, progress_path = _write_generated_artifacts(context, generated_plan)
-    json_validation_errors: list[str] = []
-    for task_path in sorted(task_dir.glob("*.json")):
-        file_errors = validate_task_file(task_path)
-        json_validation_errors.extend(file_errors)
-        if file_errors:
-            continue
-        try:
-            task_doc = TaskJson.load(task_path)
-        except Exception as exc:  # noqa: BLE001
-            json_validation_errors.append(f"Task schema error in {task_path}: {exc}")
-            continue
-        json_validation_errors.extend(_validate_task_capability_ids(task_doc, config))
-    if json_validation_errors:
-        raise click.ClickException("\n".join(json_validation_errors))
+    progress = load_progress(config.progress_file)
+    validate_errors = _collect_validate_errors(config, progress)
+    check_errors = _collect_loop_check_errors(
+        config_path=resolved_config_path,
+        loop_dir=loop_dir,
+        config=config,
+        progress=progress,
+    )
+    errors = [*validate_errors, *check_errors]
+    if errors:
+        raise click.ClickException("\n".join(errors))
     click.echo(f"Generated {count} task file(s) in {task_dir}")
     click.echo(f"Generated progress file: {progress_path}")

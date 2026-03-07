@@ -103,12 +103,12 @@ def test_runtime_guards_load_valid_configuration(tmp_path: Path) -> None:
                 "backends": {"coder": {"engine": "codex"}},
                 "runtime_guards": {
                     "pre_code": {
-                        "command": "./scripts/ralph/preflight.sh",
+                        "command": "./.ralph-loop/guard.sh pre",
                         "timeout_seconds": 120,
                         "on_failure": "pause_loop",
                     },
                     "post_code": {
-                        "command": "./scripts/ralph/preflight.sh",
+                        "command": "./.ralph-loop/guard.sh post",
                         "timeout_seconds": 180,
                         "on_failure": "fail_attempt",
                     },
@@ -119,7 +119,7 @@ def test_runtime_guards_load_valid_configuration(tmp_path: Path) -> None:
     )
     config = RalphConfig.load(str(config_path))
     assert config.runtime_guards.pre_code is not None
-    assert config.runtime_guards.pre_code.command == "./scripts/ralph/preflight.sh"
+    assert config.runtime_guards.pre_code.command == "./.ralph-loop/guard.sh pre"
     assert config.runtime_guards.pre_code.timeout_seconds == 120
     assert config.runtime_guards.pre_code.on_failure == "pause_loop"
     assert config.runtime_guards.post_code is not None

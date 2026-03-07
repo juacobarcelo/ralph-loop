@@ -1,6 +1,12 @@
-You are converting a project plan into ralph-loop task files.
+You are converting a project plan into an intermediate ralph-loop generated plan file.
 
-Return STRICT JSON only.
+The source of truth is the generated plan file, not stdout.
+Write the complete JSON document to `{{ plan_output_path }}`.
+After writing the file, run this validation command:
+`{{ plan_validation_command }}`
+If validation fails, fix the file, rewrite it completely, and rerun the validation command until it passes.
+Do not write final loop artifacts directly; only write the generated plan JSON file.
+Stdout may be empty or contain a short completion note, but do not print the full JSON document to stdout.
 
 Schema:
 {
@@ -50,8 +56,8 @@ Rules:
 - When reviewer/browser runs in Docker, translate local URLs from `http://localhost:<port>` (or `127.0.0.1`) to `http://host.docker.internal:<port>` in `review.service_urls`.
 - Do not emit `visual_verify`, `setup_commands`, or `teardown_commands` for new tasks.
 - Keep exploration focused and minimal: inspect only files required to derive task structure and runnable commands. Start with the relevant Ralph config files, then prefer top-level manifests, automation files, or runtime guard files that actually exist. Avoid broad recursive repo scans unless a required value is missing.
-- After you have enough evidence to derive runnable commands and realistic task boundaries, stop using tools and emit the final JSON immediately.
-- Do not narrate your process or output any prose before the final JSON.
+- After you have enough evidence to derive runnable commands and realistic task boundaries, stop using tools, write the generated plan file, validate it, and exit.
+- Do not narrate your process in stdout.
 - Populate `agent_capabilities` only when a task needs explicit tools for `code` or `review`. Use capability IDs exactly as listed below; do not invent IDs.
 - If a task requires runtime/service/browser review, include the relevant capability IDs in `agent_capabilities.review`.
 - If additional directives conflict with inferred hints, additional directives take precedence.

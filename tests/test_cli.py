@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -11,6 +13,40 @@ from ralph_loop import cli as cli_module
 from ralph_loop.cli import main
 from ralph_loop.config import RalphConfig, VisualVerifyConfig
 from ralph_loop.progress import TaskStatus, load_progress, save_progress
+
+
+def _write_generated_plan_from_prompt(prompt: str, payload: dict[str, object]) -> Path:
+    match = re.search(r"Write the complete JSON document to `([^`]+)`\.", prompt)
+    if match is None:
+        raise AssertionError("prompt did not include generated plan output path")
+    plan_output_path = Path(match.group(1))
+    plan_output_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_output_path.write_text(json.dumps(payload), encoding="utf-8")
+    return plan_output_path
+
+
+def _configure_review_capability(config_path: Path) -> None:
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["agent_capabilities"] = {
+        "chrome-devtools": {
+            "type": "mcp",
+            "instruction": "Use Chrome DevTools MCP for browser review.",
+        }
+    }
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+
+def _reset_init_outputs(config_path: Path) -> None:
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    task_dir = Path(payload.get("task_dir", config_path.parent / "tasks"))
+    progress_file = Path(payload.get("progress_file", config_path.parent / "PROGRESS.yaml"))
+
+    if task_dir.exists():
+        shutil.rmtree(task_dir)
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    if progress_file.exists():
+        progress_file.unlink()
 
 
 def test_status_command(sample_workspace: Path) -> None:
@@ -39,6 +75,108 @@ def test_validate_command(sample_workspace: Path) -> None:
     )
     assert result.exit_code == 0
     assert "Validation passed." in result.output
+
+
+def test_validate_plan_command_accepts_generated_plan_file(sample_workspace: Path) -> None:
+    plan_file = sample_workspace / ".ralph-tmp" / "generated-plan.json"
+    plan_file.parent.mkdir(parents=True, exist_ok=True)
+    plan_file.write_text(
+        json.dumps(
+            {
+                "title": "Plan Validation",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [
+                            {
+                                "id": "01",
+                                "title": "Create feature",
+                                "description": "Implement feature",
+                                "acceptance_criteria": ["It works"],
+                                "priority": "high",
+                                "verify_commands": ["pytest tests/"],
+                                "review": {
+                                    "focus": ["Review the runtime behavior"],
+                                    "service_urls": ["http://host.docker.internal:3001"],
+                                    "runtime_expectations": ["The page renders"],
+                                },
+                                "agent_capabilities": {
+                                    "review": ["chrome-devtools"],
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["agent_capabilities"] = {
+        "chrome-devtools": {
+            "type": "mcp",
+            "instruction": "Use Chrome DevTools MCP for browser review.",
+        }
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "validate-plan",
+            "--plan-file",
+            str(plan_file),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Plan validation passed." in result.output
+
+
+def test_validate_plan_command_rejects_destructive_verify_commands(sample_workspace: Path) -> None:
+    plan_file = sample_workspace / ".ralph-tmp" / "generated-plan-invalid.json"
+    plan_file.parent.mkdir(parents=True, exist_ok=True)
+    plan_file.write_text(
+        json.dumps(
+            {
+                "title": "Bad Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [
+                            {
+                                "id": "01",
+                                "title": "Restart service",
+                                "description": "Bad verify command",
+                                "verify_commands": ["docker compose restart web"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "validate-plan",
+            "--plan-file",
+            str(plan_file),
+            "--config",
+            str(sample_workspace / "ralph-config.yaml"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "non-destructive" in result.output
 
 
 def test_init_engine_prefers_init_role(sample_workspace: Path) -> None:
@@ -78,12 +216,16 @@ def test_init_engine_accepts_initialize_alias(sample_workspace: Path) -> None:
 def test_init_command_generates_files_with_backend_output(
     sample_workspace: Path, monkeypatch
 ) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    _configure_review_capability(config_path)
+    _reset_init_outputs(config_path)
+
     class _FakeBackend:
         def is_available(self) -> bool:
             return True
 
         def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
-            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            _ = model, timeout_seconds, extra_flags, cwd
             payload = {
                 "title": "Demo Plan",
                 "phases": [
@@ -108,15 +250,17 @@ def test_init_command_generates_files_with_backend_output(
                                 "files_not_to_touch": ["src/core.py"],
                                 "constraints": ["Follow style"],
                                 "reference_impl": None,
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
                             }
                         ],
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
                 duration_seconds = 0.1
                 timed_out = False
@@ -157,12 +301,90 @@ def test_init_command_generates_files_with_backend_output(
     assert payload["phases"][0]["tasks"][0]["verify_commands"] == ["pytest tests/"]
 
 
+def test_check_command_passes_for_generated_loop(sample_workspace: Path, monkeypatch) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["agent_capabilities"] = {
+        "chrome-devtools": {
+            "type": "mcp",
+            "instruction": "Use Chrome DevTools MCP for browser review.",
+        }
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+    _reset_init_outputs(config_path)
+
+    class _FakeBackend:
+        def is_available(self) -> bool:
+            return True
+
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Checkable Plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [
+                            {
+                                "id": "01",
+                                "title": "Create feature",
+                                "description": "Implement feature",
+                                "verify_commands": ["pytest tests/"],
+                                "review": {
+                                    "focus": ["Review the runtime behavior"],
+                                    "service_urls": ["http://host.docker.internal:3001"],
+                                    "runtime_expectations": ["The page renders"],
+                                },
+                                "agent_capabilities": {
+                                    "review": ["chrome-devtools"],
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+            _write_generated_plan_from_prompt(prompt, payload)
+
+            class _Result:
+                exit_code = 0
+                stdout = "generated plan file"
+                stderr = ""
+                duration_seconds = 0.1
+                timed_out = False
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
+
+    plan_path = sample_workspace / "plan-check.md"
+    plan_path.write_text("# Plan\n- [ ] Create feature", encoding="utf-8")
+
+    runner = CliRunner()
+    init_result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert init_result.exit_code == 0
+
+    check_result = runner.invoke(main, ["check", "--config", str(config_path)])
+    assert check_result.exit_code == 0
+    assert "Loop checks passed." in check_result.output
+
+
 def test_init_command_fails_when_backend_unavailable(sample_workspace: Path, monkeypatch) -> None:
     class _UnavailableBackend:
         def is_available(self) -> bool:
             return False
 
     monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _UnavailableBackend())
+    _reset_init_outputs(sample_workspace / "ralph-config.yaml")
 
     plan_path = sample_workspace / "plan-fallback.md"
     plan_path.write_text("# MVP\n- [ ] First task\n- [ ] Second task", encoding="utf-8")
@@ -202,6 +424,7 @@ def test_init_command_fails_when_backend_output_is_invalid(
             return _Result()
 
     monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _InvalidBackend())
+    _reset_init_outputs(sample_workspace / "ralph-config.yaml")
 
     plan_path = sample_workspace / "plan-invalid-output.md"
     plan_path.write_text("# Plan\n- [ ] First task", encoding="utf-8")
@@ -222,13 +445,68 @@ def test_init_command_fails_when_backend_output_is_invalid(
     assert "after 3 attempts" in result.output
 
 
-def test_init_applies_verify_and_review_hints(sample_workspace: Path, monkeypatch) -> None:
-    class _FakeBackend:
+def test_init_command_ignores_stdout_and_requires_plan_file(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    class _MisleadingBackend:
         def is_available(self) -> bool:
             return True
 
         def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
             _ = prompt, model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Stdout Only",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [{"id": "01", "title": "Create feature"}],
+                    }
+                ],
+            }
+
+            class _Result:
+                exit_code = 0
+                stdout = json.dumps(payload)
+                stderr = ""
+                duration_seconds = 0.1
+                timed_out = False
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _MisleadingBackend())
+    _reset_init_outputs(sample_workspace / "ralph-config.yaml")
+
+    plan_path = sample_workspace / "plan-stdout-only.md"
+    plan_path.write_text("# Plan\n- [ ] Create feature", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--config",
+            str(sample_workspace / "ralph-config.yaml"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Generated plan file is invalid" in result.output
+
+
+def test_init_applies_verify_and_review_hints(sample_workspace: Path, monkeypatch) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    _configure_review_capability(config_path)
+    _reset_init_outputs(config_path)
+
+    class _FakeBackend:
+        def is_available(self) -> bool:
+            return True
+
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = model, timeout_seconds, extra_flags, cwd
             payload = {
                 "title": "Runtime Review Plan",
                 "phases": [
@@ -240,16 +518,23 @@ def test_init_applies_verify_and_review_hints(sample_workspace: Path, monkeypatc
                                 "id": "01",
                                 "title": "Build homepage",
                                 "description": "Build homepage",
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
                             },
-                            {"id": "02", "title": "Add tests", "description": "Add tests"},
+                            {
+                                "id": "02",
+                                "title": "Add tests",
+                                "description": "Add tests",
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
+                            },
                         ],
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
                 duration_seconds = 0.1
                 timed_out = False
@@ -297,11 +582,14 @@ Verification:
     generated_task = json.loads(
         (sample_workspace / "tasks" / "01-build-homepage.json").read_text(encoding="utf-8")
     )
-    assert generated_task["review"]["service_urls"] == ["http://localhost:3001"]
+    assert generated_task["review"]["service_urls"] == ["http://host.docker.internal:3001"]
     assert generated_task["review"]["runtime_expectations"] == ["homepage title is visible."]
 
 
 def test_init_includes_inline_instructions_in_prompt(sample_workspace: Path, monkeypatch) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    _configure_review_capability(config_path)
+    _reset_init_outputs(config_path)
     captured_prompt: dict[str, str] = {}
 
     class _FakeBackend:
@@ -321,15 +609,17 @@ def test_init_includes_inline_instructions_in_prompt(sample_workspace: Path, mon
                             {
                                 "id": "01",
                                 "title": "Create feature",
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
                             }
                         ],
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
                 duration_seconds = 0.1
                 timed_out = False
@@ -357,6 +647,8 @@ def test_init_includes_inline_instructions_in_prompt(sample_workspace: Path, mon
 
     assert result.exit_code == 0
     assert "Additional directives (highest priority):" in captured_prompt["value"]
+    assert "Write the complete JSON document to `" in captured_prompt["value"]
+    assert "-m ralph_loop validate-plan" in captured_prompt["value"]
     assert (
         "Review in the running app that the video list renders correctly at http://localhost:3001."
         in captured_prompt["value"]
@@ -366,6 +658,9 @@ def test_init_includes_inline_instructions_in_prompt(sample_workspace: Path, mon
 def test_init_includes_instructions_file_and_inline_in_prompt(
     sample_workspace: Path, monkeypatch
 ) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    _configure_review_capability(config_path)
+    _reset_init_outputs(config_path)
     captured_prompt: dict[str, str] = {}
 
     class _FakeBackend:
@@ -385,15 +680,17 @@ def test_init_includes_instructions_file_and_inline_in_prompt(
                             {
                                 "id": "01",
                                 "title": "Create feature",
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
                             }
                         ],
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
                 duration_seconds = 0.1
                 timed_out = False
@@ -442,12 +739,16 @@ def test_init_includes_instructions_file_and_inline_in_prompt(
 
 
 def test_init_visual_directive_only_at_end(sample_workspace: Path, monkeypatch) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    _configure_review_capability(config_path)
+    _reset_init_outputs(config_path)
+
     class _FakeBackend:
         def is_available(self) -> bool:
             return True
 
         def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
-            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            _ = model, timeout_seconds, extra_flags, cwd
             payload = {
                 "title": "Directive Plan",
                 "phases": [
@@ -459,20 +760,23 @@ def test_init_visual_directive_only_at_end(sample_workspace: Path, monkeypatch) 
                                 "id": "01",
                                 "title": "Build homepage layout",
                                 "description": "Build homepage layout",
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
                             },
                             {
                                 "id": "02",
                                 "title": "Improve homepage button readability",
                                 "description": "Improve homepage button readability",
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
                             },
                         ],
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
                 duration_seconds = 0.1
                 timed_out = False
@@ -518,12 +822,16 @@ def test_init_visual_directive_only_at_end(sample_workspace: Path, monkeypatch) 
 
 
 def test_init_visual_directive_targets_specific_task(sample_workspace: Path, monkeypatch) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    _configure_review_capability(config_path)
+    _reset_init_outputs(config_path)
+
     class _FakeBackend:
         def is_available(self) -> bool:
             return True
 
         def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
-            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            _ = model, timeout_seconds, extra_flags, cwd
             payload = {
                 "title": "Directive Plan",
                 "phases": [
@@ -535,25 +843,29 @@ def test_init_visual_directive_targets_specific_task(sample_workspace: Path, mon
                                 "id": "01",
                                 "title": "Crear API de videos",
                                 "description": "Crear API de videos",
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
                             },
                             {
                                 "id": "02",
                                 "title": "Renderizar lista de videos",
                                 "description": "Renderizar lista de videos",
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
                             },
                             {
                                 "id": "03",
                                 "title": "Añadir tests",
                                 "description": "Añadir tests",
+                                "agent_capabilities": {"review": ["chrome-devtools"]},
                             },
                         ],
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
                 duration_seconds = 0.1
                 timed_out = False
@@ -615,13 +927,14 @@ def test_init_creates_target_directories_when_missing(sample_workspace: Path, mo
     config_payload["progress_file"] = str(progress_file)
     config_payload["pause_file"] = str(pause_file)
     config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+    _reset_init_outputs(config_path)
 
     class _FakeBackend:
         def is_available(self) -> bool:
             return True
 
         def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
-            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            _ = model, timeout_seconds, extra_flags, cwd
             payload = {
                 "title": "Setup Plan",
                 "phases": [
@@ -632,10 +945,11 @@ def test_init_creates_target_directories_when_missing(sample_workspace: Path, mo
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
 
             return _Result()
@@ -671,13 +985,14 @@ def test_init_ensures_unified_config_defaults(sample_workspace: Path, monkeypatc
     payload["backends"].pop("reviewer", None)
     payload.pop("runtime_guards", None)
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    _reset_init_outputs(config_path)
 
     class _FakeBackend:
         def is_available(self) -> bool:
             return True
 
         def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
-            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            _ = model, timeout_seconds, extra_flags, cwd
             payload = {
                 "title": "Setup Plan",
                 "phases": [
@@ -688,10 +1003,11 @@ def test_init_ensures_unified_config_defaults(sample_workspace: Path, monkeypatc
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
 
             return _Result()
@@ -716,9 +1032,12 @@ def test_init_ensures_unified_config_defaults(sample_workspace: Path, monkeypatc
 
     updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert updated["review_mode"] == "unified_agent"
+    assert "init" in updated["backends"]
     assert "reviewer" in updated["backends"]
-    assert updated["backends"]["reviewer"]["engine"] == updated["backends"]["inspector"]["engine"]
-    assert updated["runtime_guards"]["pre_code"]["command"] == "./scripts/ralph/guard.sh"
+    assert updated["backends"]["reviewer"]["engine"] == "copilot"
+    assert "inspector" not in updated["backends"]
+    assert updated["verify_commands"] == []
+    assert updated["runtime_guards"]["pre_code"]["command"] == "./.ralph-loop/guard.sh pre"
     assert updated["runtime_guards"]["pre_code"]["on_failure"] == "pause_loop"
     assert updated["runtime_guards"]["post_code"]["on_failure"] == "fail_attempt"
 
@@ -726,8 +1045,9 @@ def test_init_ensures_unified_config_defaults(sample_workspace: Path, monkeypatc
 def test_init_creates_guard_script_and_verify_file_in_workspace(
     sample_workspace: Path, monkeypatch
 ) -> None:
-    script_path = sample_workspace / "scripts" / "ralph" / "guard.sh"
-    verify_file = sample_workspace / "scripts" / "ralph" / "verify-commands.txt"
+    _reset_init_outputs(sample_workspace / "ralph-config.yaml")
+    script_path = sample_workspace / ".ralph-loop" / "guard.sh"
+    verify_file = sample_workspace / ".ralph-loop" / "verify-commands.txt"
     assert not script_path.exists()
     assert not verify_file.exists()
 
@@ -736,7 +1056,7 @@ def test_init_creates_guard_script_and_verify_file_in_workspace(
             return True
 
         def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
-            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            _ = model, timeout_seconds, extra_flags, cwd
             payload = {
                 "title": "Setup Plan",
                 "phases": [
@@ -747,10 +1067,11 @@ def test_init_creates_guard_script_and_verify_file_in_workspace(
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
 
             return _Result()
@@ -802,13 +1123,14 @@ def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, mon
         ),
         encoding="utf-8",
     )
+    _reset_init_outputs(config_path)
 
     class _FakeBackend:
         def is_available(self) -> bool:
             return True
 
         def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
-            _ = prompt, model, timeout_seconds, extra_flags, cwd
+            _ = model, timeout_seconds, extra_flags, cwd
             payload = {
                 "title": "Setup Plan",
                 "phases": [
@@ -819,10 +1141,11 @@ def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, mon
                     }
                 ],
             }
+            _write_generated_plan_from_prompt(prompt, payload)
 
             class _Result:
                 exit_code = 0
-                stdout = json.dumps(payload)
+                stdout = "generated plan file"
                 stderr = ""
 
             return _Result()
@@ -851,7 +1174,7 @@ def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, mon
     assert (loop_dir / "product").exists()
     updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert updated["verify_commands"] == []
-    assert (loop_dir / "product" / "scripts" / "ralph" / "guard.sh").exists()
+    assert (loop_dir / "product" / ".ralph-loop" / "guard.sh").exists()
 
 
 def test_next_action_and_update_flow(sample_workspace: Path, monkeypatch) -> None:
@@ -1710,7 +2033,7 @@ def test_next_action_unified_starts_with_runtime_pre_code(
     payload["review_mode"] = "unified_agent"
     payload["runtime_guards"] = {
         "pre_code": {
-            "command": "./scripts/ralph/guard.sh",
+            "command": "./.ralph-loop/guard.sh pre",
             "timeout_seconds": 120,
             "on_failure": "pause_loop",
         }
@@ -1733,7 +2056,7 @@ def test_next_action_unified_starts_with_runtime_pre_code(
     output = json.loads(result.output)
     assert output["command"] == "runtime"
     assert output["phase"] == "pre_code"
-    assert output["runtime_command"] == "./scripts/ralph/guard.sh"
+    assert output["runtime_command"] == "./.ralph-loop/guard.sh pre"
     assert output["timeout_seconds"] == 120
 
 
@@ -1750,12 +2073,12 @@ def test_next_action_unified_transitions_runtime_code_runtime_review(
     }
     payload["runtime_guards"] = {
         "pre_code": {
-            "command": "./scripts/ralph/guard.sh",
+            "command": "./.ralph-loop/guard.sh pre",
             "timeout_seconds": 120,
             "on_failure": "pause_loop",
         },
         "post_code": {
-            "command": "./scripts/ralph/guard.sh",
+            "command": "./.ralph-loop/guard.sh post",
             "timeout_seconds": 120,
             "on_failure": "fail_attempt",
         },
@@ -2029,7 +2352,7 @@ def test_update_command_unified_fails_on_runtime_post_without_missing_review(
                 "step": "runtime_post_code",
                 "task_id": "01",
                 "exit_code": 1,
-                "runtime_command": "./scripts/ralph/guard.sh",
+                "runtime_command": "./.ralph-loop/guard.sh post",
                 "stdout": "",
                 "stderr": "service unavailable",
             },

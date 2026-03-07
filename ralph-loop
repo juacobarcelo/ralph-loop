@@ -316,6 +316,64 @@ run_cli_with_auth_file() {
     docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" "${docker_extra[@]}" "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
 }
 
+run_init_cli_with_auth_file() {
+    local image="$1"; shift
+    local auth_file="$1"; shift
+    local loop_dir_host="$1"; shift
+    local loop_dir_container="$1"; shift
+    local plan_output_host="$1"; shift
+    local plan_output_container="$1"; shift
+    local args=("$@")
+    local auth_env=() auth_mount=()
+    local container_home="/home/ralph"
+    local engine="${image#ralph-loop-}"
+    local docker_extra=()
+    local existing_plan_output
+    local mount_plan_output=1
+    local plan_output_mount=()
+
+    mkdir -p "$PWD/$RALPH_TMP" "$loop_dir_host"
+
+    mapfile -t docker_extra < <(get_docker_run_extra_args "init" "$engine")
+
+    while IFS= read -r env_var; do
+        [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
+    done < <(jq -r '.env[]? // empty' "$auth_file")
+    append_auth_mounts_from_json \
+        "$auth_file" \
+        '.mount[]? // empty' \
+        "$engine" \
+        "$container_home" \
+        auth_mount
+
+    existing_plan_output="$(extract_cli_option_value "--plan-output-file" "${args[@]}")"
+    if [[ -z "$existing_plan_output" ]]; then
+        args+=("--plan-output-file" "$plan_output_container")
+    fi
+
+    case "$plan_output_host" in
+        "$PWD/$RALPH_TMP"/*|"$loop_dir_host"/*)
+            mount_plan_output=0
+            ;;
+    esac
+    if [[ "$mount_plan_output" -eq 1 ]]; then
+        plan_output_mount=(-v "$plan_output_host:$plan_output_container")
+    fi
+
+    docker run --rm -u "$DOCKER_USER" \
+        --read-only \
+        --tmpfs /tmp \
+        --tmpfs /home/ralph/.cache \
+        -v "$PWD:/workspace:ro" \
+        -v "$PWD/$RALPH_TMP:/workspace/.ralph-tmp" \
+        -v "$loop_dir_host:$loop_dir_container" \
+        "${plan_output_mount[@]}" \
+        "${docker_extra[@]}" \
+        "${auth_env[@]}" "${auth_mount[@]}" \
+        "$image" \
+        "${args[@]}"
+}
+
 extract_init_backend_override() {
     local args=("$@")
     local index
@@ -388,6 +446,51 @@ container_path_to_host_path() {
         return
     fi
     echo "$path"
+}
+
+resolve_host_path() {
+    local raw_path="$1"
+    python3 - "$raw_path" <<'PY'
+import os
+import sys
+
+print(os.path.abspath(sys.argv[1]))
+PY
+}
+
+host_path_to_container_path() {
+    local raw_path="$1"
+    local host_path
+    host_path="$(resolve_host_path "$raw_path")"
+    if [[ "$host_path" == "$PWD" ]]; then
+        echo "/workspace"
+        return
+    fi
+    if [[ "$host_path" == "$PWD/"* ]]; then
+        echo "/workspace/${host_path#$PWD/}"
+        return
+    fi
+    echo "$host_path"
+}
+
+extract_cli_option_value() {
+    local option_name="$1"
+    shift
+    local args=("$@")
+    local index
+    for ((index=0; index<${#args[@]}; index++)); do
+        if [[ "${args[index]}" == "$option_name" ]]; then
+            if (( index + 1 < ${#args[@]} )); then
+                echo "${args[index + 1]}"
+                return
+            fi
+        fi
+        if [[ "${args[index]}" == "$option_name="* ]]; then
+            echo "${args[index]#${option_name}=}"
+            return
+        fi
+    done
+    echo ""
 }
 
 print_coder_prompt() {
@@ -706,7 +809,28 @@ cmd_status() {
 
 cmd_init() {
     local args=("$@")
+    local source_arg
+    local loop_dir_host loop_dir_container
+    local plan_output_arg plan_output_host plan_output_container
     ensure_image "base"
+
+    source_arg="$(extract_cli_option_value "--from" "${args[@]}")"
+    if [[ -z "$source_arg" ]]; then
+        log_error "init requires --from <source-plan>"
+        exit 1
+    fi
+
+    plan_output_arg="$(extract_cli_option_value "--plan-output-file" "${args[@]}")"
+    if [[ -n "$plan_output_arg" ]]; then
+        plan_output_host="$(resolve_host_path "$plan_output_arg")"
+        plan_output_container="$(host_path_to_container_path "$plan_output_host")"
+    else
+        plan_output_host="$PWD/$RALPH_TMP/generated-plan.json"
+        plan_output_container="/workspace/$RALPH_TMP/generated-plan.json"
+    fi
+
+    loop_dir_host="$(dirname "$(resolve_host_path "$source_arg")")/.ralph-loop"
+    loop_dir_container="$(host_path_to_container_path "$loop_dir_host")"
 
     local engine
     engine=$(extract_init_backend_override "${args[@]}")
@@ -725,11 +849,21 @@ cmd_init() {
     ensure_image "$engine"
 
     mkdir -p "$RALPH_TMP"
+    mkdir -p "$loop_dir_host"
+    mkdir -p "$(dirname "$plan_output_host")"
+    : > "$plan_output_host"
     local auth_file="$RALPH_TMP/init-auth.json"
     run_base auth-config --engine "$engine" --config "/workspace/$CONFIG" > "$auth_file"
 
     log_info "Running init with backend image: ralph-loop-$engine"
-    run_cli_with_auth_file "ralph-loop-$engine" "$auth_file" init --config "/workspace/$CONFIG" "${args[@]}"
+    run_init_cli_with_auth_file \
+        "ralph-loop-$engine" \
+        "$auth_file" \
+        "$loop_dir_host" \
+        "$loop_dir_container" \
+        "$plan_output_host" \
+        "$plan_output_container" \
+        init --config "/workspace/$CONFIG" "${args[@]}"
 }
 
 cmd_validate() {
@@ -747,6 +881,21 @@ cmd_validate() {
     run_base validate --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR"
 }
 
+cmd_check() {
+    local args=("$@")
+    if [[ ${#args[@]} -gt 0 && "${args[0]}" != -* ]]; then
+        resolve_loop_dir_from_argument "${args[0]}"
+        args=("${args[@]:1}")
+    fi
+    if [[ ${#args[@]} -gt 0 ]]; then
+        log_error "Unknown arguments for check: ${args[*]}"
+        exit 1
+    fi
+
+    ensure_image "base"
+    run_base check --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR"
+}
+
 cmd_build_images() {
     for target in base codex copilot claude; do
         ensure_image "$target"
@@ -760,12 +909,14 @@ case "$SUBCOMMAND" in
     status) cmd_status "$@" ;;
     init) cmd_init "$@" ;;
     validate) cmd_validate "$@" ;;
+    check) cmd_check "$@" ;;
     build-images) cmd_build_images "$@" ;;
     help|--help|-h)
-        echo "Usage: ralph-loop <run|status|init|validate|build-images>"
+        echo "Usage: ralph-loop <run|status|init|validate|check|build-images>"
         echo "  run [LOOP_DIR]"
         echo "  status [LOOP_DIR]"
         echo "  validate [LOOP_DIR]"
+        echo "  check [LOOP_DIR]"
         echo "  init [args...]"
         ;;
     *)

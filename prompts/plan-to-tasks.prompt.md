@@ -1,8 +1,8 @@
 # /plan-to-tasks
 
-Convert the following project plan into ralph-loop tasks.
+Convert the following project plan into an intermediate `generated-plan.json` for ralph-loop.
 
-Output strict JSON only with this shape:
+Write the plan JSON to the output file path provided in the prompt, validate it with the provided command, and do not print the JSON to stdout. The file must use this shape:
 
 ```json
 {

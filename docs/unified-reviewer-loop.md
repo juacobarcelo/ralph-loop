@@ -138,12 +138,12 @@ Instead, the loop designer provides a script or command with exit-code semantics
 ```yaml
 runtime_guards:
   pre_code:
-    command: "./scripts/ralph/guard.sh"
+    command: "./.ralph-loop/guard.sh pre"
     timeout_seconds: 180
     on_failure: "pause_loop"
 
   post_code:
-    command: "./scripts/ralph/guard.sh"
+    command: "./.ralph-loop/guard.sh post"
     timeout_seconds: 180
     on_failure: "fail_attempt"
 ```
@@ -341,11 +341,11 @@ Add:
 ```yaml
 runtime_guards:
   pre_code:
-    command: "./scripts/ralph/guard.sh"
+    command: "./.ralph-loop/guard.sh pre"
     timeout_seconds: 180
     on_failure: "pause_loop"
   post_code:
-    command: "./scripts/ralph/guard.sh"
+    command: "./.ralph-loop/guard.sh post"
     timeout_seconds: 180
     on_failure: "fail_attempt"
 ```
@@ -572,7 +572,7 @@ Status (implemented in this repo):
   - `review_mode: unified_agent`
   - `backends.reviewer`
   - `runtime_guards.pre_code` and `runtime_guards.post_code`
-- `init` also auto-creates/validates `scripts/ralph/guard.sh` and `scripts/ralph/verify-commands.txt` in the configured workspace.
+- `init` also auto-creates/validates `.ralph-loop/guard.sh` and `.ralph-loop/verify-commands.txt` in the configured workspace.
 
 ### Step 5
 Deprecate but temporarily keep legacy `visual` and `inspect` parsing for backward compatibility.

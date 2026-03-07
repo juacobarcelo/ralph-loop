@@ -34,6 +34,7 @@ Use the same `LOOP_DIR` for status/validation:
 ```bash
 ./ralph-loop status PRD/extractor_frames_desde_video/.ralph-loop
 ./ralph-loop validate PRD/extractor_frames_desde_video/.ralph-loop
+./ralph-loop check PRD/extractor_frames_desde_video/.ralph-loop
 ```
 
 ---
@@ -161,6 +162,10 @@ Or provide a directives file:
 
 Both flags are composable. When both are present, `--instructions-file` content is appended first,
 then `--instructions`.
+
+`init` now asks the backend to write an intermediate `generated-plan.json` under `.ralph-tmp/`,
+validates it with `ralph-loop validate-plan`, and only then materializes `tasks/*.json` and
+`PROGRESS.yaml`.
 
 This creates a dedicated loop directory next to the plan:
 

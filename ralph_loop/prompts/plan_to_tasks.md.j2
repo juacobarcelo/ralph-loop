@@ -45,7 +45,16 @@ Schema:
 
 Rules:
 - Create concrete, testable tasks.
+- Create concrete, testable tasks with practical granularity: not epics and not tiny mechanical edits.
 - Use 1+ phases and at least 1 task per phase.
+- Each task should deliver one dominant outcome that can be coded and reviewed as a coherent unit.
+- Keep multiple changes in the same task only when they are tightly coupled and all required to deliver that single outcome.
+- Split a candidate task when it contains multiple independently reviewable user flows, domains, screens, or backend integrations.
+- Split a candidate task when shared substrate can be implemented first and then reused by later tasks.
+- When a feature includes both definition/configuration work and execution/runtime behavior, separate them if they can be implemented and reviewed independently.
+- Do not split tasks into trivial setup-only, rename-only, or one-file mechanical edits unless they are meaningful prerequisites or have standalone review value.
+- A task is too large if it would likely require a broad cross-cutting implementation attempt or many unrelated acceptance criteria.
+- A task is too small if it would likely produce only a tiny isolated edit with little standalone review value.
 - Include `verify_commands` only for deterministic host-side checks that confirm the environment remains healthy and that code-level regression checks still pass after coding.
 - Prefer repository-configured checks: inspect `./ralph-config.yaml` first and reuse `verify_commands` from it when present.
 - `verify_commands` run with working directory already set to the project `workspace_dir`.

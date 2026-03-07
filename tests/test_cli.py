@@ -650,6 +650,14 @@ def test_init_includes_inline_instructions_in_prompt(sample_workspace: Path, mon
     assert "Write the complete JSON document to `" in captured_prompt["value"]
     assert "-m ralph_loop validate-plan" in captured_prompt["value"]
     assert (
+        "Create concrete, testable tasks with practical granularity: not epics and not tiny mechanical edits."
+        in captured_prompt["value"]
+    )
+    assert (
+        "When a feature includes both definition/configuration work and execution/runtime behavior,"
+        in captured_prompt["value"]
+    )
+    assert (
         "Review in the running app that the video list renders correctly at http://localhost:3001."
         in captured_prompt["value"]
     )

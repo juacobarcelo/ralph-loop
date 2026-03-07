@@ -191,19 +191,19 @@ Use directives to control generated task metadata, not only prose. The generator
 frontmatter-compatible fields that drive the loop:
 
 - `acceptance_criteria`: concrete, testable checks.
-- `verify_commands`: deterministic commands executed in the generated `product/` workspace.
-- `visual_verify`: screenshot verification contract (`url`, `reference`, `assertion`, viewport).
+- `verify_commands`: deterministic, host-side, non-destructive checks that confirm environment health and code-level regressions.
+- `review`: runtime/service/browser review context (`focus`, `service_urls`, `runtime_expectations`) for the reviewer step.
 - `files_to_touch` / `files_not_to_touch`: implementation boundaries.
 - `constraints`: hard limits or guardrails for coding.
 
 Directive examples that reliably shape output:
 
 - `Review visually that the video list loads correctly.`
-  - Expected effect: attach `visual_verify` to the task that implements/renders the video list.
+  - Expected effect: attach reviewer runtime context to the task that implements/renders the video list.
 - `Review only at the end visually that all buttons are displayed and legible.`
-  - Expected effect: attach `visual_verify` only to the final relevant task.
+  - Expected effect: attach reviewer runtime context only to the final relevant task.
 - `Use verify_commands: python -m pytest -q tests and ruff check src`.
-  - Expected effect: include deterministic checks in generated tasks.
+  - Expected effect: include deterministic host-side checks in generated tasks.
 
 Tip for best results: keep plans focused on deliverables, and place strict behavioral constraints in
 directives so they override inferred defaults.
@@ -504,7 +504,6 @@ phase: 1
 priority: high
 verify_commands:
   - "python -m pytest tests/test_api.py -v"
-visual_verify: null
 contract_file: null
 files_to_touch:
   - "src/api.py"
@@ -544,7 +543,7 @@ Every attempt runs **all three** verification stages — even if earlier stages 
 |---|---|---|
 | **Deterministic** | Runs `verify_commands` via `bash -lc`, collects exit codes + output | Always |
 | **AI Inspection** | Sends git diff + criteria to inspector backend, expects `{"verdict":"pass\|fail","feedback":"..."}` | Always |
-| **Visual** | Screenshot via Playwright, AI review of screenshot (optional reference image) | When `visual_verify` is configured |
+| **Reviewer Runtime Checks** | Reviewer may use browser/runtime tooling against `review.service_urls` when acceptance criteria require it | When task `review` context warrants it |
 
 ---
 

@@ -298,16 +298,15 @@ The reviewer prompt should receive legacy fields if present:
 - `visual.url`
 - `visual.assertion`
 - `visual.reference`
-- `visual.setup_commands`
-- `visual.teardown_commands`
 
 ### Future Task Schema
 In a later migration, tasks may define:
 ```json
 {
   "review": {
-    "runtime_url": "http://localhost:3001",
-    "runtime_hint": "Browser review needed for header badge and 402 dialog.",
+    "service_urls": ["http://host.docker.internal:3001"],
+    "runtime_expectations": ["Header badge and 402 dialog render correctly."],
+    "focus": ["Review runtime/UI behavior for header state and credit gating."],
     "acceptance_criteria": ["..."]
   }
 }

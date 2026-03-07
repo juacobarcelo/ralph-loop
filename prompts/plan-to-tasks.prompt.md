@@ -20,6 +20,11 @@ Output strict JSON only with this shape:
           "test_plan": "string",
           "priority": "high|medium|low",
           "verify_commands": ["string"],
+          "review": {
+            "focus": ["string"],
+            "service_urls": ["string"],
+            "runtime_expectations": ["string"]
+          },
           "files_to_touch": ["string"],
           "files_not_to_touch": ["string"],
           "constraints": ["string"],

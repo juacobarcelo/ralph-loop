@@ -35,8 +35,6 @@ class VisualSection(BaseModel):
     reference: str | None = None
     viewport_width: int = 1280
     viewport_height: int = 720
-    setup_commands: list[str] = Field(default_factory=list)
-    teardown_commands: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
 
     def to_visual_verify_config(self) -> VisualVerifyConfig:
@@ -46,8 +44,6 @@ class VisualSection(BaseModel):
             reference=self.reference,
             viewport_width=self.viewport_width,
             viewport_height=self.viewport_height,
-            setup_commands=self.setup_commands,
-            teardown_commands=self.teardown_commands,
         )
 
 
@@ -56,6 +52,16 @@ class InspectSection(BaseModel):
 
     acceptance_criteria: list[str] = Field(default_factory=list)
     description_summary: str = ""
+
+
+class ReviewSection(BaseModel):
+    """Reviewer-facing context for runtime, UI, or service validation."""
+
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    description_summary: str = ""
+    focus: list[str] = Field(default_factory=list)
+    service_urls: list[str] = Field(default_factory=list)
+    runtime_expectations: list[str] = Field(default_factory=list)
 
 
 class AgentCapabilitiesSection(BaseModel):
@@ -74,8 +80,9 @@ class TaskJson(BaseModel):
     priority: str = "medium"
     coding: CodingSection
     verify: VerifySection = Field(default_factory=VerifySection)
+    review: ReviewSection = Field(default_factory=ReviewSection)
     visual: VisualSection | None = None
-    inspect: InspectSection = Field(default_factory=InspectSection)
+    inspect: InspectSection | None = None
     agent_capabilities: AgentCapabilitiesSection = Field(default_factory=AgentCapabilitiesSection)
 
     @classmethod
@@ -90,7 +97,12 @@ class TaskJson(BaseModel):
         task_path = Path(path)
         task_path.parent.mkdir(parents=True, exist_ok=True)
         task_path.write_text(
-            json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=True) + "\n",
+            json.dumps(
+                self.model_dump(mode="json", exclude_none=True),
+                indent=2,
+                ensure_ascii=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
 

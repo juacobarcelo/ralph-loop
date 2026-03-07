@@ -291,32 +291,6 @@ run_review_cli() {
         "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
 }
 
-run_visual_setup_commands() {
-    local cwd="$1"
-    while IFS= read -r cmd; do
-        [[ -z "$cmd" ]] && continue
-        log_info "Task $TASK_ID: visual setup -> $cmd"
-        set +e
-        run_trusted_verify_cmd "$cwd" "$cmd"
-        local cmd_exit=$?
-        set -e
-        if [[ "$cmd_exit" -ne 0 ]]; then
-            log_warn "Task $TASK_ID: visual setup command exited with $cmd_exit"
-        fi
-    done < <(jq -r '.setup_commands[]? // empty' "$RALPH_TMP/next-action.json")
-}
-
-run_visual_teardown_commands() {
-    local cwd="$1"
-    while IFS= read -r cmd; do
-        [[ -z "$cmd" ]] && continue
-        log_info "Task $TASK_ID: visual teardown -> $cmd"
-        set +e
-        run_trusted_verify_cmd "$cwd" "$cmd"
-        set -e
-    done < <(jq -r '.teardown_commands[]? // empty' "$RALPH_TMP/next-action.json")
-}
-
 run_cli_with_auth_file() {
     local image="$1"; shift
     local auth_file="$1"; shift
@@ -670,10 +644,7 @@ cmd_run() {
             visual)
                 IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
                 build_backend_args
-                VERIFY_CWD_RAW=$(jq -r '.workspace_dir // "/workspace"' "$RALPH_TMP/next-action.json")
-                VERIFY_CWD=$(container_path_to_host_path "$VERIFY_CWD_RAW")
                 log_info "Task $TASK_ID: visual check via $IMAGE..."
-                run_visual_setup_commands "$VERIFY_CWD"
                 VISUAL_STDOUT_FILE="$RALPH_TMP/visual-stdout.txt"
                 VISUAL_STDERR_FILE="$RALPH_TMP/visual-stderr.txt"
                 : > "$VISUAL_STDOUT_FILE"
@@ -688,7 +659,6 @@ cmd_run() {
                     2> >(tee "$VISUAL_STDERR_FILE" >&2)
                 EXIT_CODE=$?
                 set -e
-                run_visual_teardown_commands "$VERIFY_CWD"
                 STDOUT=$(cat "$VISUAL_STDOUT_FILE")
                 log_info "Task $TASK_ID: visual finished (exit $EXIT_CODE)"
                 jq -n --arg task "$TASK_ID" --argjson exit "$EXIT_CODE" --arg out "$STDOUT" '{step:"visual",task_id:$task,exit_code:$exit,stdout:$out}' > "$RALPH_TMP/step-result.json"

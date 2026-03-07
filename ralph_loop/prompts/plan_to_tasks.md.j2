@@ -18,16 +18,11 @@ Schema:
           "test_plan": "string",
           "priority": "high|medium|low",
           "verify_commands": ["string"],
-          "visual_verify": {
-            "type": "screenshot",
-            "url": "string",
-            "reference": "string|null",
-            "assertion": "string",
-            "viewport_width": 1280,
-            "viewport_height": 720,
-            "setup_commands": ["string"],
-            "teardown_commands": ["string"]
-          } | null,
+          "review": {
+            "focus": ["string"],
+            "service_urls": ["string"],
+            "runtime_expectations": ["string"]
+          },
           "agent_capabilities": {
             "code": ["string"],
             "review": ["string"]
@@ -45,19 +40,20 @@ Schema:
 Rules:
 - Create concrete, testable tasks.
 - Use 1+ phases and at least 1 task per phase.
-- Include `verify_commands` whenever the plan provides runnable checks.
+- Include `verify_commands` only for deterministic host-side checks that confirm the environment remains healthy and that code-level regression checks still pass after coding.
 - Prefer repository-configured checks: inspect `./ralph-config.yaml` first and reuse `verify_commands` from it when present.
 - `verify_commands` run with working directory already set to the project `workspace_dir`.
 - Do not prefix `verify_commands` with `cd tmp/product` (or any `cd` to the workspace path).
-- Include `visual_verify` for tasks that explicitly require visual checks.
-- If visual verification should inspect only the current screenshot, set `visual_verify.reference` to `null`.
-- When `visual_verify.url` targets a local service (e.g., `http://localhost:PORT`), populate `setup_commands` with the commands needed to start that service (e.g., `docker compose up -d SERVICE`, `sleep 3`) and `teardown_commands` to stop it. These run on the host before and after the screenshot.
-- When the reviewer/visual runner is containerized, translate local URLs from `http://localhost:<port>` (or `127.0.0.1`) to `http://host.docker.internal:<port>` in `visual_verify.url`.
-- If the service is already guaranteed to be running externally, leave `setup_commands` and `teardown_commands` as empty arrays.
+- `verify_commands` must be safe for a shared host environment: do not start/stop services, sleep, mutate persistent state, seed data, or call mutating HTTP methods.
+- If a task needs runtime, service, browser, or UI review, encode that in `review.focus`, `review.service_urls`, and `review.runtime_expectations` instead of `visual_verify`.
+- `review.service_urls` should list only the URLs the reviewer may need to inspect while validating acceptance criteria.
+- When reviewer/browser runs in Docker, translate local URLs from `http://localhost:<port>` (or `127.0.0.1`) to `http://host.docker.internal:<port>` in `review.service_urls`.
+- Do not emit `visual_verify`, `setup_commands`, or `teardown_commands` for new tasks.
 - Keep exploration focused and minimal: inspect only files required to derive task structure and runnable commands. Start with the relevant Ralph config files, then prefer top-level manifests, automation files, or runtime guard files that actually exist. Avoid broad recursive repo scans unless a required value is missing.
 - After you have enough evidence to derive runnable commands and realistic task boundaries, stop using tools and emit the final JSON immediately.
 - Do not narrate your process or output any prose before the final JSON.
 - Populate `agent_capabilities` only when a task needs explicit tools for `code` or `review`. Use capability IDs exactly as listed below; do not invent IDs.
+- If a task requires runtime/service/browser review, include the relevant capability IDs in `agent_capabilities.review`.
 - If additional directives conflict with inferred hints, additional directives take precedence.
 - Output valid JSON with double quotes only.
 

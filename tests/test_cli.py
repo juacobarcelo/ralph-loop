@@ -99,13 +99,10 @@ def test_init_command_generates_files_with_backend_output(
                                 "test_plan": "1. Run tests",
                                 "priority": "high",
                                 "verify_commands": ["pytest tests/"],
-                                "visual_verify": {
-                                    "type": "screenshot",
-                                    "url": "http://localhost:3000",
-                                    "reference": "references/home.jpg",
-                                    "assertion": "Main title is visible",
-                                    "viewport_width": 1280,
-                                    "viewport_height": 720,
+                                "review": {
+                                    "focus": ["Review the homepage in the running service."],
+                                    "service_urls": ["http://host.docker.internal:3000"],
+                                    "runtime_expectations": ["Main title is visible"],
                                 },
                                 "files_to_touch": ["src/feature.py"],
                                 "files_not_to_touch": ["src/core.py"],
@@ -148,7 +145,9 @@ def test_init_command_generates_files_with_backend_output(
     assert generated_task.exists()
     generated_task_payload = json.loads(generated_task.read_text(encoding="utf-8"))
     assert generated_task_payload["verify"]["commands"] == ["pytest tests/"]
-    assert generated_task_payload["visual"]["reference"] == "references/home.jpg"
+    assert generated_task_payload["review"]["service_urls"] == [
+        "http://host.docker.internal:3000"
+    ]
     assert generated_task_payload["coding"]["files_to_touch"] == ["src/feature.py"]
 
     progress_path = sample_workspace / "PROGRESS.yaml"
@@ -156,7 +155,6 @@ def test_init_command_generates_files_with_backend_output(
     assert payload["meta"]["title"] == "Demo Plan"
     assert payload["phases"][0]["tasks"][0]["title"] == "Create feature"
     assert payload["phases"][0]["tasks"][0]["verify_commands"] == ["pytest tests/"]
-    assert payload["phases"][0]["tasks"][0]["visual_verify"]["reference"] == "references/home.jpg"
 
 
 def test_init_command_fails_when_backend_unavailable(sample_workspace: Path, monkeypatch) -> None:
@@ -224,7 +222,7 @@ def test_init_command_fails_when_backend_output_is_invalid(
     assert "after 3 attempts" in result.output
 
 
-def test_init_applies_verify_and_visual_hints(sample_workspace: Path, monkeypatch) -> None:
+def test_init_applies_verify_and_review_hints(sample_workspace: Path, monkeypatch) -> None:
     class _FakeBackend:
         def is_available(self) -> bool:
             return True
@@ -232,7 +230,7 @@ def test_init_applies_verify_and_visual_hints(sample_workspace: Path, monkeypatc
         def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
             _ = prompt, model, timeout_seconds, extra_flags, cwd
             payload = {
-                "title": "Visual Plan",
+                "title": "Runtime Review Plan",
                 "phases": [
                     {
                         "id": 1,
@@ -260,17 +258,16 @@ def test_init_applies_verify_and_visual_hints(sample_workspace: Path, monkeypatc
 
     monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
 
-    plan_path = sample_workspace / "plan-visual.md"
+    plan_path = sample_workspace / "plan-review.md"
     plan_path.write_text(
         """# Plan
 
 - [ ] Build homepage
 - [ ] Add tests
 
-Visual verification requirement:
-- Add one task with `visual_verify` configured.
-- Use a data URL as target (no local server required).
-- Reference image path: `tmp/product/references/home.jpg`.
+Runtime review requirement:
+- Add one task with reviewer runtime context.
+- Use http://localhost:3001 as target.
 - Assertion: homepage title is visible.
 
 Verification:
@@ -297,73 +294,11 @@ Verification:
     assert all(
         task["verify_commands"] == ["python -m pytest -q ./tmp/product/tests"] for task in tasks
     )
-    assert any(task["visual_verify"] is not None for task in tasks)
-
-
-def test_init_applies_visual_hint_without_reference(sample_workspace: Path, monkeypatch) -> None:
-    class _FakeBackend:
-        def is_available(self) -> bool:
-            return True
-
-        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
-            _ = prompt, model, timeout_seconds, extra_flags, cwd
-            payload = {
-                "title": "Visual Plan",
-                "phases": [
-                    {
-                        "id": 1,
-                        "name": "Phase 1",
-                        "tasks": [
-                            {"id": "01", "title": "Build homepage", "description": "Build homepage"}
-                        ],
-                    }
-                ],
-            }
-
-            class _Result:
-                exit_code = 0
-                stdout = json.dumps(payload)
-                stderr = ""
-                duration_seconds = 0.1
-                timed_out = False
-
-            return _Result()
-
-    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
-
-    plan_path = sample_workspace / "plan-visual-no-reference.md"
-    plan_path.write_text(
-        """# Plan
-
-- [ ] Build homepage
-
-Visual verification requirement:
-- Add one task with `visual_verify` configured.
-- Use a data URL as target (no local server required).
-- Do not use any reference image; inspect the current screenshot only.
-- Assertion: homepage title is visible.
-""",
-        encoding="utf-8",
+    generated_task = json.loads(
+        (sample_workspace / "tasks" / "01-build-homepage.json").read_text(encoding="utf-8")
     )
-
-    runner = CliRunner()
-    result = runner.invoke(
-        main,
-        [
-            "init",
-            "--from",
-            str(plan_path),
-            "--config",
-            str(sample_workspace / "ralph-config.yaml"),
-        ],
-    )
-    assert result.exit_code == 0
-
-    progress = yaml.safe_load((sample_workspace / "PROGRESS.yaml").read_text(encoding="utf-8"))
-    tasks = progress["phases"][0]["tasks"]
-    visual_tasks = [task for task in tasks if task["visual_verify"] is not None]
-    assert visual_tasks
-    assert visual_tasks[0]["visual_verify"]["reference"] is None
+    assert generated_task["review"]["service_urls"] == ["http://localhost:3001"]
+    assert generated_task["review"]["runtime_expectations"] == ["homepage title is visible."]
 
 
 def test_init_includes_inline_instructions_in_prompt(sample_workspace: Path, monkeypatch) -> None:
@@ -414,7 +349,7 @@ def test_init_includes_inline_instructions_in_prompt(sample_workspace: Path, mon
             "--from",
             str(plan_path),
             "--instructions",
-            "Review visually that the video list renders correctly.",
+            "Review in the running app that the video list renders correctly at http://localhost:3001.",
             "--config",
             str(sample_workspace / "ralph-config.yaml"),
         ],
@@ -422,7 +357,10 @@ def test_init_includes_inline_instructions_in_prompt(sample_workspace: Path, mon
 
     assert result.exit_code == 0
     assert "Additional directives (highest priority):" in captured_prompt["value"]
-    assert "Review visually that the video list renders correctly." in captured_prompt["value"]
+    assert (
+        "Review in the running app that the video list renders correctly at http://localhost:3001."
+        in captured_prompt["value"]
+    )
 
 
 def test_init_includes_instructions_file_and_inline_in_prompt(
@@ -568,11 +506,15 @@ def test_init_visual_directive_only_at_end(sample_workspace: Path, monkeypatch) 
     )
 
     assert result.exit_code == 0
-    progress = yaml.safe_load((sample_workspace / "PROGRESS.yaml").read_text(encoding="utf-8"))
-    tasks = progress["phases"][0]["tasks"]
-    visual_tasks = [task for task in tasks if task["visual_verify"] is not None]
-    assert len(visual_tasks) == 1
-    assert visual_tasks[0]["id"] == "02"
+    generated_tasks = {
+        payload["title"]: payload
+        for payload in (
+            json.loads(task_file.read_text(encoding="utf-8"))
+            for task_file in sorted((sample_workspace / "tasks").glob("*.json"))
+        )
+    }
+    assert generated_tasks["Build homepage layout"]["review"]["focus"] == []
+    assert generated_tasks["Improve homepage button readability"]["review"]["focus"]
 
 
 def test_init_visual_directive_targets_specific_task(sample_workspace: Path, monkeypatch) -> None:
@@ -646,11 +588,16 @@ def test_init_visual_directive_targets_specific_task(sample_workspace: Path, mon
     )
 
     assert result.exit_code == 0
-    progress = yaml.safe_load((sample_workspace / "PROGRESS.yaml").read_text(encoding="utf-8"))
-    tasks = progress["phases"][0]["tasks"]
-    visual_tasks = [task for task in tasks if task["visual_verify"] is not None]
-    assert len(visual_tasks) == 1
-    assert visual_tasks[0]["id"] == "02"
+    generated_tasks = {
+        payload["title"]: payload
+        for payload in (
+            json.loads(task_file.read_text(encoding="utf-8"))
+            for task_file in sorted((sample_workspace / "tasks").glob("*.json"))
+        )
+    }
+    assert generated_tasks["Crear API de videos"]["review"]["focus"] == []
+    assert generated_tasks["Renderizar lista de videos"]["review"]["focus"]
+    assert generated_tasks["Añadir tests"]["review"]["focus"] == []
 
 
 def test_init_creates_target_directories_when_missing(sample_workspace: Path, monkeypatch) -> None:
@@ -1695,7 +1642,7 @@ def test_next_action_includes_visual_step(sample_workspace: Path, monkeypatch) -
     assert json.loads(third.output)["command"] == "inspect"
 
 
-def test_next_action_visual_includes_setup_teardown_commands(
+def test_next_action_visual_no_longer_emits_setup_teardown_commands(
     sample_workspace: Path, monkeypatch
 ) -> None:
     config_path = sample_workspace / "ralph-config.yaml"
@@ -1713,8 +1660,6 @@ def test_next_action_visual_includes_setup_teardown_commands(
             "assertion": "Layout should match",
             "viewport_width": 1280,
             "viewport_height": 720,
-            "setup_commands": ["docker compose up -d myservice", "sleep 3"],
-            "teardown_commands": ["docker compose stop myservice"],
         }
     )
     save_progress(progress, str(progress_path))
@@ -1752,8 +1697,8 @@ def test_next_action_visual_includes_setup_teardown_commands(
     assert second.exit_code == 0
     second_payload = json.loads(second.output)
     assert second_payload["command"] == "visual"
-    assert second_payload["setup_commands"] == ["docker compose up -d myservice", "sleep 3"]
-    assert second_payload["teardown_commands"] == ["docker compose stop myservice"]
+    assert "setup_commands" not in second_payload
+    assert "teardown_commands" not in second_payload
     assert "workspace_dir" in second_payload
 
 

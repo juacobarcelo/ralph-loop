@@ -140,8 +140,6 @@ class VisualVerifyConfig(BaseModel):
     assertion: str
     viewport_width: int = 1280
     viewport_height: int = 720
-    setup_commands: list[str] = Field(default_factory=list)
-    teardown_commands: list[str] = Field(default_factory=list)
 
 
 class RuntimeGuardConfig(BaseModel):

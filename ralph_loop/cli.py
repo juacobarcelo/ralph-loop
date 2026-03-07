@@ -81,7 +81,7 @@ class GeneratedTask(BaseModel):
     test_plan: str = ""
     priority: str = "medium"
     verify_commands: list[str] = Field(default_factory=list)
-    visual_verify: VisualVerifyConfig | None = None
+    review: dict[str, Any] = Field(default_factory=dict)
     files_to_touch: list[str] = Field(default_factory=list)
     files_not_to_touch: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
@@ -104,6 +104,35 @@ class GeneratedTask(BaseModel):
                     item.strip() for item in raw_review if isinstance(item, str) and item.strip()
                 ]
 
+        raw_focus = self.review.get("focus") if isinstance(self.review, dict) else None
+        review_focus = (
+            [item.strip() for item in raw_focus if isinstance(item, str) and item.strip()]
+            if isinstance(raw_focus, list)
+            else []
+        )
+
+        raw_service_urls = (
+            self.review.get("service_urls") if isinstance(self.review, dict) else None
+        )
+        review_service_urls = (
+            [item.strip() for item in raw_service_urls if isinstance(item, str) and item.strip()]
+            if isinstance(raw_service_urls, list)
+            else []
+        )
+
+        raw_runtime_expectations = (
+            self.review.get("runtime_expectations") if isinstance(self.review, dict) else None
+        )
+        review_runtime_expectations = (
+            [
+                item.strip()
+                for item in raw_runtime_expectations
+                if isinstance(item, str) and item.strip()
+            ]
+            if isinstance(raw_runtime_expectations, list)
+            else []
+        )
+
         return TaskJson.model_validate(
             {
                 "id": task_id,
@@ -119,23 +148,12 @@ class GeneratedTask(BaseModel):
                     "reference_impl": self.reference_impl,
                 },
                 "verify": {"commands": self.verify_commands},
-                "visual": (
-                    {
-                        "url": self.visual_verify.url,
-                        "assertion": self.visual_verify.assertion,
-                        "reference": self.visual_verify.reference,
-                        "viewport_width": self.visual_verify.viewport_width,
-                        "viewport_height": self.visual_verify.viewport_height,
-                        "setup_commands": self.visual_verify.setup_commands,
-                        "teardown_commands": self.visual_verify.teardown_commands,
-                        "acceptance_criteria": self.acceptance_criteria,
-                    }
-                    if self.visual_verify is not None
-                    else None
-                ),
-                "inspect": {
+                "review": {
                     "acceptance_criteria": self.acceptance_criteria,
                     "description_summary": summary_source[:200],
+                    "focus": review_focus,
+                    "service_urls": review_service_urls,
+                    "runtime_expectations": review_runtime_expectations,
                 },
                 "agent_capabilities": {
                     "code": code_capabilities,
@@ -556,24 +574,42 @@ def _task_review_context(task: Any, config: RalphConfig) -> dict[str, Any]:
     task_doc = _task_for_inspector(task, config)
 
     if isinstance(task_doc, TaskJson):
+        review_acceptance = task_doc.review.acceptance_criteria or task_doc.acceptance_criteria
+        review_summary = task_doc.review.description_summary or task_doc.description
+        review_focus = task_doc.review.focus
+        review_service_urls = task_doc.review.service_urls
+        review_runtime_expectations = task_doc.review.runtime_expectations
+
+        if task_doc.visual is not None:
+            if task_doc.visual.url and task_doc.visual.url not in review_service_urls:
+                review_service_urls = [*review_service_urls, task_doc.visual.url]
+            if (
+                task_doc.visual.assertion
+                and task_doc.visual.assertion not in review_runtime_expectations
+            ):
+                review_runtime_expectations = [
+                    *review_runtime_expectations,
+                    task_doc.visual.assertion,
+                ]
+
+        if task_doc.inspect is not None:
+            if not review_acceptance:
+                review_acceptance = task_doc.inspect.acceptance_criteria
+            if not review_summary:
+                review_summary = task_doc.inspect.description_summary
+
         return {
             "title": task_doc.title,
-            "description": task_doc.inspect.description_summary or task_doc.description,
-            "acceptance_criteria": task_doc.inspect.acceptance_criteria or task_doc.acceptance_criteria,
+            "description": review_summary,
+            "acceptance_criteria": review_acceptance,
             "constraints": task_doc.constraints,
             "files_to_touch": task_doc.files_to_touch,
             "files_not_to_touch": task_doc.files_not_to_touch,
-            "legacy_visual": (
-                {
-                    "url": task_doc.visual.url,
-                    "assertion": task_doc.visual.assertion,
-                    "reference": task_doc.visual.reference,
-                    "setup_commands": task_doc.visual.setup_commands,
-                    "teardown_commands": task_doc.visual.teardown_commands,
-                }
-                if task_doc.visual is not None
-                else None
-            ),
+            "review_context": {
+                "focus": review_focus,
+                "service_urls": review_service_urls,
+                "runtime_expectations": review_runtime_expectations,
+            },
             "task_doc": task_doc,
         }
 
@@ -586,16 +622,18 @@ def _task_review_context(task: Any, config: RalphConfig) -> dict[str, Any]:
             "constraints": task_doc.constraints,
             "files_to_touch": task_doc.frontmatter.files_to_touch,
             "files_not_to_touch": task_doc.frontmatter.files_not_to_touch,
-            "legacy_visual": (
+            "review_context": (
                 {
-                    "url": visual_verify.url,
-                    "assertion": visual_verify.assertion,
-                    "reference": visual_verify.reference,
-                    "setup_commands": visual_verify.setup_commands,
-                    "teardown_commands": visual_verify.teardown_commands,
+                    "focus": [],
+                    "service_urls": [visual_verify.url],
+                    "runtime_expectations": [visual_verify.assertion],
                 }
                 if visual_verify is not None
-                else None
+                else {
+                    "focus": [],
+                    "service_urls": [],
+                    "runtime_expectations": [],
+                }
             ),
             "task_doc": task_doc,
         }
@@ -607,7 +645,11 @@ def _task_review_context(task: Any, config: RalphConfig) -> dict[str, Any]:
         "constraints": [],
         "files_to_touch": [],
         "files_not_to_touch": [],
-        "legacy_visual": None,
+        "review_context": {
+            "focus": [],
+            "service_urls": [],
+            "runtime_expectations": [],
+        },
         "task_doc": None,
     }
 
@@ -658,10 +700,8 @@ def _build_reviewer_prompt(
         verify_results_json=json.dumps(verify_results, indent=2),
         runtime_results=runtime_results,
         runtime_results_json=json.dumps(runtime_results, indent=2),
-        legacy_visual=context["legacy_visual"],
-        legacy_visual_json=json.dumps(context["legacy_visual"], indent=2)
-        if context["legacy_visual"] is not None
-        else "",
+        review_context=context["review_context"],
+        review_context_json=json.dumps(context["review_context"], indent=2),
         project_instructions=project_instructions,
         contract_content=contract_content,
         capabilities=review_capabilities and _capability_prompt_context(review_capabilities),
@@ -1402,15 +1442,17 @@ def _fallback_plan(source_text: str, title_hint: str) -> GeneratedPlan:
     return _apply_plan_hints(plan, source_text)
 
 
-def _contains_visual_instruction(text: str) -> bool:
+def _contains_runtime_review_instruction(text: str) -> bool:
     lowered = text.lower()
     markers = (
         "visual verification",
-        "visual_verify",
         "visual check",
         "visually",
         "visualmente",
         "revisar visual",
+        "browser review",
+        "runtime review",
+        "service review",
     )
     return any(marker in lowered for marker in markers)
 
@@ -1428,89 +1470,104 @@ def _extract_verify_command_hint(source_text: str) -> str | None:
     return None
 
 
-def _extract_visual_verify_hint(source_text: str) -> VisualVerifyConfig | None:
+def _extract_review_context_hint(source_text: str) -> dict[str, list[str]] | None:
     lowered = source_text.lower()
-    if not _contains_visual_instruction(source_text):
+    if not _contains_runtime_review_instruction(source_text):
         return None
 
-    reference_match = re.search(
-        r"(?:Reference image path|Imagen de referencia):\s*`([^`]+)`",
-        source_text,
-        flags=re.IGNORECASE,
-    )
     assertion_match = re.search(
         r"(?:Assertion|Aserción):\s*(.+)",
         source_text,
         flags=re.IGNORECASE,
     )
-    url_match = re.search(r"URL:\s*`([^`]+)`", source_text, flags=re.IGNORECASE)
+    url_matches = re.findall(
+        r"https?://[^\s`\"')]+",
+        source_text,
+        flags=re.IGNORECASE,
+    )
+    service_urls = _dedupe_strings(url_matches)
+    runtime_expectations: list[str] = []
+    focus: list[str] = []
 
-    if url_match:
-        url = url_match.group(1).strip()
-    elif "data url" in lowered:
-        url = (
-            "data:text/html,%3Chtml%3E%3Cbody%20style%3D%22font-family%3AArial%3Bmargin%3A40px%22"
-            "%3E%3Ch1%3EMini%20Calc%3C/h1%3E%3Cp%3ESimple%20operations%20demo%3C/p%3E%3C/body%3E"
-            "%3C/html%3E"
+    if assertion_match:
+        runtime_expectations.append(assertion_match.group(1).strip())
+
+    review_phrase = _extract_visual_focus_terms(lowered)
+    if review_phrase:
+        focus.extend(f"Review runtime/UI behavior related to: {term}" for term in review_phrase)
+
+    if not focus and service_urls:
+        focus.append("Review externally observable runtime or UI behavior using the provided service URLs.")
+
+    if not any((focus, service_urls, runtime_expectations)):
+        return None
+
+    return {
+        "focus": focus,
+        "service_urls": service_urls,
+        "runtime_expectations": runtime_expectations,
+    }
+
+
+def _merge_generated_review_context(
+    task: GeneratedTask,
+    review_hint: dict[str, list[str]],
+) -> None:
+    if not isinstance(task.review, dict):
+        task.review = {}
+
+    for key in ("focus", "service_urls", "runtime_expectations"):
+        existing = task.review.get(key)
+        existing_values = (
+            [item for item in existing if isinstance(item, str) and item.strip()]
+            if isinstance(existing, list)
+            else []
         )
-    else:
-        url = "http://localhost:3000"
-
-    reference = reference_match.group(1).strip() if reference_match else None
-    assertion = (
-        assertion_match.group(1).strip()
-        if assertion_match
-        else "The page should satisfy the visual assertion."
-    )
-
-    return VisualVerifyConfig(
-        type="screenshot",
-        url=url,
-        reference=reference,
-        assertion=assertion,
-        viewport_width=1280,
-        viewport_height=720,
-    )
+        incoming_values = review_hint.get(key, [])
+        task.review[key] = _dedupe_strings([*existing_values, *incoming_values])
 
 
 def _apply_plan_hints(plan: GeneratedPlan, source_text: str) -> GeneratedPlan:
     verify_hint = _extract_verify_command_hint(source_text)
-    visual_hint = _extract_visual_verify_hint(source_text)
+    review_hint = _extract_review_context_hint(source_text)
 
     directive_text = source_text.lower()
-    visual_only_at_end = _is_final_only_visual_directive(directive_text)
-    visual_focus_terms = _extract_visual_focus_terms(directive_text)
+    review_only_at_end = _is_final_only_visual_directive(directive_text)
+    review_focus_terms = _extract_visual_focus_terms(directive_text)
 
-    has_visual = False
+    has_review_context = False
     flat_tasks: list[GeneratedTask] = []
     for phase in plan.phases:
         for task in phase.tasks:
             flat_tasks.append(task)
             if verify_hint and not task.verify_commands:
                 task.verify_commands = [verify_hint]
-            if task.visual_verify is not None:
-                has_visual = True
+            if isinstance(task.review, dict) and any(
+                isinstance(task.review.get(key), list) and task.review.get(key)
+                for key in ("focus", "service_urls", "runtime_expectations")
+            ):
+                has_review_context = True
 
-    if visual_hint is not None and flat_tasks:
-        if visual_only_at_end:
-            target = _select_visual_target(flat_tasks, visual_focus_terms, prefer_last=True)
+    if review_hint is not None and flat_tasks:
+        if review_only_at_end:
+            target = _select_visual_target(flat_tasks, review_focus_terms, prefer_last=True)
             if target is None:
                 target = flat_tasks[-1]
             for task in flat_tasks:
-                task.visual_verify = None
-            target.visual_verify = visual_hint
+                task.review = {}
+            _merge_generated_review_context(target, review_hint)
             return plan
 
-        if visual_focus_terms:
-            target = _select_visual_target(flat_tasks, visual_focus_terms, prefer_last=False)
+        if review_focus_terms:
+            target = _select_visual_target(flat_tasks, review_focus_terms, prefer_last=False)
             if target is not None:
                 for task in flat_tasks:
                     if task is not target:
-                        task.visual_verify = None
-                target.visual_verify = visual_hint
+                        task.review = {}
+                _merge_generated_review_context(target, review_hint)
                 return plan
 
-    if visual_hint is not None and not has_visual:
+    if review_hint is not None and not has_review_context:
         keywords = ("visual", "ui", "web", "index.html", "homepage", "page")
         fallback_task: GeneratedTask | None = None
         for phase in plan.phases:
@@ -1519,10 +1576,10 @@ def _apply_plan_hints(plan: GeneratedPlan, source_text: str) -> GeneratedPlan:
                     fallback_task = task
                 haystack = f"{task.title} {task.description}".lower()
                 if any(keyword in haystack for keyword in keywords):
-                    task.visual_verify = visual_hint
+                    _merge_generated_review_context(task, review_hint)
                     return plan
         if fallback_task is not None:
-            fallback_task.visual_verify = visual_hint
+            _merge_generated_review_context(fallback_task, review_hint)
 
     return plan
 
@@ -1539,7 +1596,7 @@ def _is_final_only_visual_directive(text: str) -> bool:
 
 def _extract_visual_focus_terms(text: str) -> list[str]:
     patterns = (
-        r"(?:revisar|verificar|validar)\s+visualmente\s+que\s+([^\n\.;]+)",
+        r"(?:revisar|verificar|validar)(?:\s+solo\s+al\s+final)?\s+visualmente\s+que\s+([^\n\.;]+)",
         r"(?:visually\s+(?:review|verify|check))(?:\s+that)?\s+([^\n\.;]+)",
     )
 
@@ -1566,6 +1623,11 @@ def _extract_visual_focus_terms(text: str) -> list[str]:
         "all",
         "todos",
         "todas",
+        "solo",
+        "final",
+        "esten",
+        "estén",
+        "sean",
     }
     terms: list[str] = []
     for token in re.split(r"\W+", phrase):
@@ -1818,11 +1880,6 @@ def _write_generated_artifacts(ctx: _InitContext, plan: GeneratedPlan) -> tuple[
                     "status": "not_started",
                     "retries": 0,
                     "verify_commands": task_json.verify.commands,
-                    "visual_verify": (
-                        task_json.visual_verify.model_dump(mode="json")
-                        if task_json.visual_verify
-                        else None
-                    ),
                     "feedback": [],
                 }
             )
@@ -2154,8 +2211,6 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                             "model": visual.model,
                             "timeout_seconds": visual.timeout_seconds,
                             "extra_flags": visual_flags,
-                            "setup_commands": visual_config.setup_commands,
-                            "teardown_commands": visual_config.teardown_commands,
                             "workspace_dir": config.workspace_dir,
                             "auth": config.get_auth(visual.engine).model_dump(),
                         }
@@ -2210,8 +2265,6 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                             "model": visual.model,
                             "timeout_seconds": visual.timeout_seconds,
                             "extra_flags": visual_flags,
-                            "setup_commands": visual_config.setup_commands,
-                            "teardown_commands": visual_config.teardown_commands,
                             "workspace_dir": config.workspace_dir,
                             "auth": config.get_auth(visual.engine).model_dump(),
                         }
@@ -2374,8 +2427,6 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
                                     "model": visual.model,
                                     "timeout_seconds": visual.timeout_seconds,
                                     "extra_flags": visual_flags,
-                                    "setup_commands": visual_config.setup_commands,
-                                    "teardown_commands": visual_config.teardown_commands,
                                     "workspace_dir": config.workspace_dir,
                                     "auth": config.get_auth(visual.engine).model_dump(),
                                 }

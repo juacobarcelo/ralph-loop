@@ -97,19 +97,12 @@ def test_task_json_load_and_validate(tmp_path: Path) -> None:
             "reference_impl": None,
         },
         "verify": {"commands": ["pytest tests/test_api.py"]},
-        "visual": {
-            "url": "http://localhost:3001",
-            "assertion": "Header is visible",
-            "reference": None,
-            "viewport_width": 1280,
-            "viewport_height": 720,
-            "setup_commands": [],
-            "teardown_commands": [],
-            "acceptance_criteria": ["Header is visible"],
-        },
-        "inspect": {
+        "review": {
             "acceptance_criteria": ["Returns 200"],
             "description_summary": "Implement endpoint",
+            "focus": ["Review the authenticated endpoint response in the running service."],
+            "service_urls": ["http://host.docker.internal:3001"],
+            "runtime_expectations": ["Header is visible"],
         },
         "agent_capabilities": {
             "code": ["playwright"],
@@ -121,7 +114,7 @@ def test_task_json_load_and_validate(tmp_path: Path) -> None:
     task = TaskJson.load(task_file)
     assert task.title == "Sample JSON Task"
     assert task.verify.commands == ["pytest tests/test_api.py"]
-    assert task.visual_verify is not None
+    assert task.review.service_urls == ["http://host.docker.internal:3001"]
     assert task.agent_capabilities.code == ["playwright"]
     assert task.agent_capabilities.review == ["chrome-devtools"]
     assert validate_task_file(task_file) == []

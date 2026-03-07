@@ -375,8 +375,8 @@ def test_visual_url_not_rewritten_outside_container(monkeypatch, tmp_path) -> No
     assert result == "http://localhost:8894"
 
 
-def test_visual_verify_config_accepts_setup_teardown_commands() -> None:
-    """Test that VisualVerifyConfig accepts setup and teardown commands."""
+def test_visual_verify_config_ignores_legacy_setup_teardown_commands() -> None:
+    """Legacy setup/teardown keys should be ignored by the model."""
     config = VisualVerifyConfig(
         type="screenshot",
         url="http://localhost:8894",
@@ -384,16 +384,22 @@ def test_visual_verify_config_accepts_setup_teardown_commands() -> None:
         setup_commands=["docker compose up -d myservice", "sleep 3"],
         teardown_commands=["docker compose stop myservice"],
     )
-    assert config.setup_commands == ["docker compose up -d myservice", "sleep 3"]
-    assert config.teardown_commands == ["docker compose stop myservice"]
+    assert config.url == "http://localhost:8894"
+    assert config.assertion == "Page loads correctly"
 
 
-def test_visual_verify_config_defaults_empty_setup_teardown() -> None:
-    """Test that setup and teardown commands default to empty lists."""
+def test_visual_verify_config_defaults_without_setup_teardown() -> None:
+    """Visual verification config no longer exposes setup/teardown commands."""
     config = VisualVerifyConfig(
         type="screenshot",
         url="http://localhost:8894",
         assertion="Page loads correctly",
     )
-    assert config.setup_commands == []
-    assert config.teardown_commands == []
+    assert config.model_dump() == {
+        "type": "screenshot",
+        "url": "http://localhost:8894",
+        "reference": None,
+        "assertion": "Page loads correctly",
+        "viewport_width": 1280,
+        "viewport_height": 720,
+    }

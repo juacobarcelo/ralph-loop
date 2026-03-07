@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ralph_loop.config import AuthConfig, ConfigNotFoundError, RalphConfig, resolve_config_path
+from ralph_loop.config import AuthConfig, AuthMountConfig, ConfigNotFoundError, RalphConfig, resolve_config_path
 
 
 def test_load_config(sample_workspace: Path) -> None:
@@ -18,6 +18,56 @@ def test_get_auth_unknown_engine_returns_empty(sample_workspace: Path) -> None:
     config = RalphConfig.load(str(sample_workspace / "ralph-config.yaml"))
     auth = config.get_auth("claude")
     assert auth == AuthConfig()
+
+
+def test_auth_mount_accepts_explicit_source_and_target(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {"coder": {"engine": "codex"}},
+                "auth": {
+                    "codex": {
+                        "mount": [
+                            {
+                                "source": "~/.codex",
+                                "target": "~/.codex",
+                            }
+                        ]
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = RalphConfig.load(str(config_path))
+
+    auth = config.get_auth("codex")
+    assert auth.mount == [AuthMountConfig(source="~/.codex", target="~/.codex")]
+    assert auth.iter_mount_bindings() == [("~/.codex", "/home/ralph/.codex")]
+
+
+def test_auth_mount_rejects_legacy_string_entries(tmp_path: Path) -> None:
+    config_path = tmp_path / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "backends": {"coder": {"engine": "codex"}},
+                "auth": {
+                    "codex": {
+                        "mount": ["~/.codex"]
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception):
+        RalphConfig.load(str(config_path))
 
 
 def test_review_mode_defaults_to_legacy(tmp_path: Path) -> None:

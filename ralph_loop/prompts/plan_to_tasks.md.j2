@@ -54,7 +54,9 @@ Rules:
 - When `visual_verify.url` targets a local service (e.g., `http://localhost:PORT`), populate `setup_commands` with the commands needed to start that service (e.g., `docker compose up -d SERVICE`, `sleep 3`) and `teardown_commands` to stop it. These run on the host before and after the screenshot.
 - When the reviewer/visual runner is containerized, translate local URLs from `http://localhost:<port>` (or `127.0.0.1`) to `http://host.docker.internal:<port>` in `visual_verify.url`.
 - If the service is already guaranteed to be running externally, leave `setup_commands` and `teardown_commands` as empty arrays.
-- Keep exploration focused and minimal: inspect only files required to derive task structure and runnable commands (start with `ralph-config.yaml`, `docker-compose.yml`, `package.json`, and `scripts/ralph/*` if present). Avoid broad recursive repo scans unless a required value is missing.
+- Keep exploration focused and minimal: inspect only files required to derive task structure and runnable commands. Start with the relevant Ralph config files, then prefer top-level manifests, automation files, or runtime guard files that actually exist. Avoid broad recursive repo scans unless a required value is missing.
+- After you have enough evidence to derive runnable commands and realistic task boundaries, stop using tools and emit the final JSON immediately.
+- Do not narrate your process or output any prose before the final JSON.
 - Populate `agent_capabilities` only when a task needs explicit tools for `code` or `review`. Use capability IDs exactly as listed below; do not invent IDs.
 - If additional directives conflict with inferred hints, additional directives take precedence.
 - Output valid JSON with double quotes only.

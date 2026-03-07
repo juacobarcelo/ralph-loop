@@ -228,10 +228,16 @@ class BackendConfig(BaseModel):
     max_turns: int | None = None         # Claude-specific: --max-turns
     budget_usd: float | None = None      # Claude-specific: --max-budget-usd
 
+class AuthMountConfig(BaseModel):
+    """One auth directory bind mount for Dockerized backends."""
+    source: str                          # Host directory, e.g. "~/.config/gh"
+    target: str                          # Container path, e.g. "~/.config/gh"
+
 class AuthConfig(BaseModel):
     """Auth credentials forwarding for Docker containers."""
     env: list[str] = Field(default_factory=list)     # Env vars to forward: ["OPENAI_API_KEY"]
-    mount: list[str] = Field(default_factory=list)    # Host dirs to mount: ["~/.config/gh"]
+    mount: list[AuthMountConfig] = Field(default_factory=list)
+                                             # Explicit bind mounts: source + target
 
 class VisualVerifyConfig(BaseModel):
     """Configuration for visual screenshot verification of a task."""
@@ -770,10 +776,10 @@ class SandboxBackend:
         cmd = ["docker", "run", "--rm"]
         cmd.extend(["-v", f"{self.workspace}:/workspace"])
         
-        # Mount auth directories
-        for mount_path in self.auth.mount:
-            expanded = os.path.expanduser(mount_path)
-            cmd.extend(["-v", f"{expanded}:{expanded}"])
+        # Mount staged auth directories
+        for source_path, target_path in self.auth.iter_mount_bindings(container_home="/home/ralph"):
+            expanded = os.path.expanduser(source_path)
+            cmd.extend(["-v", f"{expanded}:{target_path}"])
         
         # Forward env vars
         for env_var in self.auth.env:
@@ -839,7 +845,12 @@ The bash script and containers communicate via files in `.ralph-tmp/` (inside th
   "teardown_commands": ["docker compose stop myservice"],
   "auth": {
     "env": [],
-    "mount": ["~/.config/gh"]
+    "mount": [
+      {
+        "source": "~/.config/gh",
+        "target": "~/.config/gh"
+      }
+    ]
   }
 }
 
@@ -853,7 +864,12 @@ The bash script and containers communicate via files in `.ralph-tmp/` (inside th
   "timeout_seconds": 300,
   "auth": {
     "env": [],
-    "mount": ["~/.config/gh"]
+    "mount": [
+      {
+        "source": "~/.config/gh",
+        "target": "~/.config/gh"
+      }
+    ]
   }
 }
 
@@ -1004,10 +1020,17 @@ run_cli() {
         [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
     done < <(jq -r '.auth.env[]? // empty' "$RALPH_TMP/next-action.json")
     
-    while IFS= read -r mount_path; do
+    while IFS= read -r mount_entry; do
+        mount_path="$(jq -r '.source // empty' <<<"$mount_entry")"
+        target_path="$(jq -r '.target // empty' <<<"$mount_entry")"
         expanded="${mount_path/#\~/$HOME}"
-        [[ -d "$expanded" ]] && auth_mount+=("-v" "${expanded}:${expanded}")
-    done < <(jq -r '.auth.mount[]? // empty' "$RALPH_TMP/next-action.json")
+        if [[ "$target_path" == "~/"* ]]; then
+            container_target="/home/ralph/${target_path:2}"
+        else
+            container_target="$target_path"
+        fi
+        [[ -d "$expanded" ]] && auth_mount+=("-v" "${expanded}:${container_target}")
+    done < <(jq -c '.auth.mount[]? // empty' "$RALPH_TMP/next-action.json")
     
     docker run --rm \
         -u "$DOCKER_USER" \
@@ -1393,14 +1416,20 @@ project_instructions: null              # Path to AGENTS.md/CLAUDE.md (injected 
 auth:                                   # Credential forwarding for Docker containers
   codex:
     env: [OPENAI_API_KEY]               # Env vars forwarded to container
-    mount: []                           # Host dirs mounted into backend containers
+    mount: []                           # Explicit auth bind mounts (source + target)
   copilot:
     env: []
-    mount: ["~/.config/gh"]
+    mount:
+      - source: ~/.config/gh
+        target: ~/.config/gh
   claude:
     env: [ANTHROPIC_API_KEY]
-    mount: ["~/.claude"]
+    mount:
+      - source: ~/.claude
+        target: ~/.claude
 ```
+
+If `target` starts with `~/`, ralph-loop resolves it against the home directory of the user running inside the container. Auth source directories are staged through a temporary copy under `.ralph-tmp/` before they are mounted into Docker.
 
 ## PROGRESS.yaml Structure
 
@@ -2088,8 +2117,9 @@ Not a Python CLI command — handled by the bash script directly.
 
 | Service | Credential Source | Mount/Env |
 |---|---|---|
-| GitHub Copilot | `~/.config/gh/` | Volume mount |
+| GitHub Copilot | `~/.config/gh/` | `mount: [{source: ~/.config/gh, target: ~/.config/gh}]` |
 | OpenAI Codex | `OPENAI_API_KEY` | Env var |
+| OpenAI Codex (account auth) | `~/.codex/` | `mount: [{source: ~/.codex, target: ~/.codex}]` |
 | Anthropic Claude | `~/.claude/` + `ANTHROPIC_API_KEY` | Volume mount + env var |
 
 ---

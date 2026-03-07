@@ -47,13 +47,10 @@ class SandboxBackend:
             container_cwd,
         ]
 
-        for mount_path in self.auth.mount:
-            expanded = Path(mount_path).expanduser().resolve()
+        for source_path, target_path in self.auth.iter_mount_bindings(container_home="/home/ralph"):
+            expanded = Path(source_path).expanduser().resolve()
             if expanded.exists():
-                if mount_path.startswith("~/"):
-                    container_target = Path("/home/ralph") / mount_path[2:]
-                else:
-                    container_target = expanded
+                container_target = Path(target_path)
                 command.extend(["-v", f"{expanded}:{container_target}"])
 
         for env_name in self.auth.env:

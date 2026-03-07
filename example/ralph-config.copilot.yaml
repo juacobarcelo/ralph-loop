@@ -31,4 +31,6 @@ verify_commands:
 auth:
   copilot:
     env: []
-    mount: ["~/.config/gh"]
+    mount:
+      - source: ~/.config/gh
+        target: ~/.config/gh

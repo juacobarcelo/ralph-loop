@@ -62,7 +62,15 @@ def test_copilot_execute_uses_prompt_flag(monkeypatch) -> None:
 
 def test_sandbox_backend_builds_docker_command(monkeypatch, tmp_path) -> None:
     inner = get_backend("codex")
-    auth = AuthConfig(env=["OPENAI_API_KEY"], mount=[str(tmp_path / "auth")])
+    auth = AuthConfig(
+        env=["OPENAI_API_KEY"],
+        mount=[
+            {
+                "source": str(tmp_path / "auth"),
+                "target": str(tmp_path / "auth"),
+            }
+        ],
+    )
     backend = SandboxBackend(inner=inner, auth_config=auth, workspace_dir=str(tmp_path))
 
     prompt_file = tmp_path / "prompt.md"
@@ -103,6 +111,38 @@ def test_sandbox_backend_builds_docker_command(monkeypatch, tmp_path) -> None:
     assert "123" in captured["cmd"]
     assert "--extra-flag" in captured["cmd"]
     assert "--json" in captured["cmd"]
+
+
+def test_sandbox_backend_uses_explicit_auth_mount_target(monkeypatch, tmp_path) -> None:
+    inner = get_backend("codex")
+    auth = AuthConfig(
+        mount=[
+            {
+                "source": str(tmp_path / "auth"),
+                "target": "~/.codex",
+            }
+        ]
+    )
+    backend = SandboxBackend(inner=inner, auth_config=auth, workspace_dir=str(tmp_path))
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("hello", encoding="utf-8")
+
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir()
+
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, check, timeout):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = backend.execute(prompt=str(prompt_file), timeout_seconds=30, cwd=str(tmp_path))
+
+    assert result.exit_code == 0
+    assert f"{auth_dir}:/home/ralph/.codex" in captured["cmd"]
 
 
 def test_sandbox_backend_writes_prompt_and_handles_timeout(monkeypatch, tmp_path) -> None:

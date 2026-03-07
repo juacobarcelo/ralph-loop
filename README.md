@@ -239,7 +239,9 @@ auth:
     mount: []
   copilot:
     env: []
-    mount: ["~/.config/gh"]
+    mount:
+      - source: ~/.config/gh
+        target: ~/.config/gh
 ```
 
 ### 4. Run the loop
@@ -390,7 +392,9 @@ auth:
 auth:
   codex:
     env: []
-    mount: ["~/.config/codex"]
+    mount:
+      - source: ~/.codex
+        target: ~/.codex
 ```
 
 Both methods can be combined. When both are present, the Codex CLI uses the API key first. In **native mode** (`uvx ralph-loop run` without `--sandbox docker`), Codex inherits the host environment directly, so any method that works on your host works automatically.
@@ -403,7 +407,9 @@ Copilot authenticates through the GitHub CLI (`gh`). You must be logged in via `
 auth:
   copilot:
     env: []
-    mount: ["~/.config/gh"]
+    mount:
+      - source: ~/.config/gh
+        target: ~/.config/gh
 ```
 
 The `~/.config/gh` directory contains your GitHub session tokens and is mounted into Docker containers so `gh`/Copilot can reuse your existing host login. No environment variables are needed.
@@ -438,7 +444,9 @@ auth:
 auth:
   claude:
     env: []
-    mount: ["~/.config/claude"]
+    mount:
+      - source: ~/.claude
+        target: ~/.claude
 ```
 
 ### How Auth Forwarding Works
@@ -446,20 +454,33 @@ auth:
 The `auth` section in `ralph-config.yaml` controls what gets passed into Docker containers:
 
 - **`env`** — environment variables forwarded with `-e`. If the variable is set on the host, it's injected into the container. If not set, it's silently skipped.
-- **`mount`** — host directories mounted with `-v path:path`. Paths support `~` expansion. If the directory doesn't exist, it's skipped.
+- **`mount`** — list of objects with:
+  - `source`: host directory to stage and mount into the container
+  - `target`: destination path inside the container
+- `source` and `target` both support `~` expansion.
+- If `target` starts with `~/`, ralph-loop resolves it against the home directory of the user running inside the container.
+- Auth mounts are staged through a temporary copy under `.ralph-tmp/` before `docker run`, so backend tools never write back into the original host auth directory directly.
 
 ```yaml
 auth:
   codex:
     env: [OPENAI_API_KEY]
-    mount: ["~/.config/codex"]
+    mount:
+      - source: ~/.codex
+        target: ~/.codex
   copilot:
     env: []
-    mount: ["~/.config/gh"]
+    mount:
+      - source: ~/.config/gh
+        target: ~/.config/gh
   claude:
     env: [ANTHROPIC_API_KEY]
-    mount: ["~/.config/claude"]
+    mount:
+      - source: ~/.claude
+        target: ~/.claude
 ```
+
+Example: `target: ~/.codex` becomes something like `/home/ralph/.codex` inside the container, depending on the container user configured by the runtime.
 
 In **native mode** (no Docker), the `auth` section is ignored — backends inherit the full host environment and filesystem, so all authentication methods that work on the host work automatically.
 
@@ -467,9 +488,9 @@ In **native mode** (no Docker), the `auth` section is ignored — backends inher
 
 | Backend | Env Variable | Config Directory | Needs Interactive Login? |
 |---|---|---|---|
-| **Codex** | `OPENAI_API_KEY` | `~/.config/codex` | Only for account auth (`codex auth`) |
+| **Codex** | `OPENAI_API_KEY` | `~/.codex` | Only for account auth (`codex auth`) |
 | **Copilot** | — | `~/.config/gh` | Yes (`gh auth login`) |
-| **Claude** | `ANTHROPIC_API_KEY` | `~/.config/claude` | Only for account auth (`claude auth`) |
+| **Claude** | `ANTHROPIC_API_KEY` | `~/.claude` | Only for account auth (`claude auth`) |
 
 ---
 

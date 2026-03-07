@@ -108,11 +108,27 @@ class BackendConfig(BaseModel):
     budget_usd: float | None = None
 
 
+class AuthMountConfig(BaseModel):
+    """One auth directory bind mount for Dockerized backends."""
+
+    source: str
+    target: str
+
+
 class AuthConfig(BaseModel):
     """Auth credentials forwarding for Docker containers."""
 
     env: list[str] = Field(default_factory=list)
-    mount: list[str] = Field(default_factory=list)
+    mount: list[AuthMountConfig] = Field(default_factory=list)
+
+    def iter_mount_bindings(self, container_home: str = "/home/ralph") -> list[tuple[str, str]]:
+        bindings: list[tuple[str, str]] = []
+        for mount in self.mount:
+            target = mount.target
+            if target.startswith("~/"):
+                target = str(Path(container_home) / target[2:])
+            bindings.append((mount.source, target))
+        return bindings
 
 
 class VisualVerifyConfig(BaseModel):

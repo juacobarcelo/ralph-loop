@@ -1,7 +1,7 @@
 FROM python:3.12-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git jq curl ca-certificates gh && \
+    git jq curl ca-certificates gh ripgrep && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
@@ -9,6 +9,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     rm -f /etc/apt/sources.list.d/nodesource.list && \
     rm -f /etc/apt/keyrings/nodesource.gpg && \
     rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g chrome-devtools-mcp
 
 COPY pyproject.toml README.md LICENSE /app/
 COPY ralph_loop/ /app/ralph_loop/

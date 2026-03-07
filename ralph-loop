@@ -76,6 +76,52 @@ for arg in deduped:
 PY
 }
 
+prepare_auth_mount_staging_dir() {
+    local source_dir="$1"
+    local mount_path="$2"
+    local sanitized_mount
+    local staging_dir
+
+    sanitized_mount="$(printf '%s' "$mount_path" | sed 's#[^A-Za-z0-9._-]#_#g')"
+    staging_dir="$PWD/$RALPH_TMP/auth-mounts/$sanitized_mount"
+
+    rm -rf "$staging_dir"
+    mkdir -p "$staging_dir"
+    chmod 700 "$staging_dir"
+    cp -a "$source_dir"/. "$staging_dir"/
+    printf '%s\n' "$staging_dir"
+}
+
+append_auth_mounts_from_json() {
+    local json_file="$1"
+    local jq_expr="$2"
+    local engine="$3"
+    local container_home="$4"
+    local auth_mount_array_name="$5"
+    local mount_entry mount_path target_path expanded container_target host_mount
+    local -n auth_mount_array="$auth_mount_array_name"
+
+    while IFS= read -r mount_entry; do
+        mount_path="$(jq -r '.source // empty' <<<"$mount_entry")"
+        target_path="$(jq -r '.target // empty' <<<"$mount_entry")"
+        [[ -n "$mount_path" && -n "$target_path" ]] || continue
+
+        expanded="${mount_path/#\~/$HOME}"
+        if [[ ! -d "$expanded" ]]; then
+            continue
+        fi
+
+        host_mount="$(prepare_auth_mount_staging_dir "$expanded" "$mount_path")"
+        if [[ "$target_path" == "~/"* ]]; then
+            container_target="${container_home}/${target_path:2}"
+        else
+            container_target="$target_path"
+        fi
+
+        auth_mount_array+=("-v" "${host_mount}:${container_target}")
+    done < <(jq -c "$jq_expr" "$json_file")
+}
+
 cleanup() {
     rm -rf "$RALPH_TMP"
     exit "${1:-0}"
@@ -176,18 +222,12 @@ run_cli() {
     while IFS= read -r env_var; do
         [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
     done < <(jq -r '.auth.env[]? // empty' "$RALPH_TMP/next-action.json")
-
-    while IFS= read -r mount_path; do
-        expanded="${mount_path/#\~/$HOME}"
-        if [[ -d "$expanded" ]]; then
-            if [[ "$mount_path" == "~/"* ]]; then
-                container_target="${container_home}/${mount_path:2}"
-            else
-                container_target="$expanded"
-            fi
-            auth_mount+=("-v" "${expanded}:${container_target}")
-        fi
-    done < <(jq -r '.auth.mount[]? // empty' "$RALPH_TMP/next-action.json")
+    append_auth_mounts_from_json \
+        "$RALPH_TMP/next-action.json" \
+        '.auth.mount[]? // empty' \
+        "$engine" \
+        "$container_home" \
+        auth_mount
 
     docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" "${docker_extra[@]}" "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
 }
@@ -204,18 +244,12 @@ run_visual_cli() {
     while IFS= read -r env_var; do
         [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
     done < <(jq -r '.auth.env[]? // empty' "$RALPH_TMP/next-action.json")
-
-    while IFS= read -r mount_path; do
-        expanded="${mount_path/#\~/$HOME}"
-        if [[ -d "$expanded" ]]; then
-            if [[ "$mount_path" == "~/"* ]]; then
-                container_target="${container_home}/${mount_path:2}"
-            else
-                container_target="$expanded"
-            fi
-            auth_mount+=("-v" "${expanded}:${container_target}")
-        fi
-    done < <(jq -r '.auth.mount[]? // empty' "$RALPH_TMP/next-action.json")
+    append_auth_mounts_from_json \
+        "$RALPH_TMP/next-action.json" \
+        '.auth.mount[]? // empty' \
+        "$engine" \
+        "$container_home" \
+        auth_mount
 
     docker run --rm -u "$DOCKER_USER" \
         --add-host=host.docker.internal:host-gateway \
@@ -239,18 +273,12 @@ run_review_cli() {
     while IFS= read -r env_var; do
         [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
     done < <(jq -r '.auth.env[]? // empty' "$RALPH_TMP/next-action.json")
-
-    while IFS= read -r mount_path; do
-        expanded="${mount_path/#\~/$HOME}"
-        if [[ -d "$expanded" ]]; then
-            if [[ "$mount_path" == "~/"* ]]; then
-                container_target="${container_home}/${mount_path:2}"
-            else
-                container_target="$expanded"
-            fi
-            auth_mount+=("-v" "${expanded}:${container_target}")
-        fi
-    done < <(jq -r '.auth.mount[]? // empty' "$RALPH_TMP/next-action.json")
+    append_auth_mounts_from_json \
+        "$RALPH_TMP/next-action.json" \
+        '.auth.mount[]? // empty' \
+        "$engine" \
+        "$container_home" \
+        auth_mount
 
     docker run --rm -u "$DOCKER_USER" \
         --read-only \
@@ -304,18 +332,12 @@ run_cli_with_auth_file() {
     while IFS= read -r env_var; do
         [[ -n "${!env_var:-}" ]] && auth_env+=("-e" "$env_var")
     done < <(jq -r '.env[]? // empty' "$auth_file")
-
-    while IFS= read -r mount_path; do
-        expanded="${mount_path/#\~/$HOME}"
-        if [[ -d "$expanded" ]]; then
-            if [[ "$mount_path" == "~/"* ]]; then
-                container_target="${container_home}/${mount_path:2}"
-            else
-                container_target="$expanded"
-            fi
-            auth_mount+=("-v" "${expanded}:${container_target}")
-        fi
-    done < <(jq -r '.mount[]? // empty' "$auth_file")
+    append_auth_mounts_from_json \
+        "$auth_file" \
+        '.mount[]? // empty' \
+        "$engine" \
+        "$container_home" \
+        auth_mount
 
     docker run --rm -u "$DOCKER_USER" -v "$PWD:/workspace" "${docker_extra[@]}" "${auth_env[@]}" "${auth_mount[@]}" "$image" "$@"
 }
@@ -737,7 +759,7 @@ cmd_init() {
     run_base auth-config --engine "$engine" --config "/workspace/$CONFIG" > "$auth_file"
 
     log_info "Running init with backend image: ralph-loop-$engine"
-    run_cli_with_auth_file "ralph-loop-$engine" "$auth_file" init "${args[@]}"
+    run_cli_with_auth_file "ralph-loop-$engine" "$auth_file" init --config "/workspace/$CONFIG" "${args[@]}"
 }
 
 cmd_validate() {

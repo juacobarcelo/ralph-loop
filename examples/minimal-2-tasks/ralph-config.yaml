@@ -23,4 +23,6 @@ auth:
     mount: []
   copilot:
     env: []
-    mount: ["~/.config/gh"]
+    mount:
+      - source: ~/.config/gh
+        target: ~/.config/gh

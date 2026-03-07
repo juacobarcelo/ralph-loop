@@ -492,6 +492,10 @@ def test_init_includes_instructions_file_and_inline_in_prompt(
 
     assert result.exit_code == 0
     prompt_value = captured_prompt["value"]
+    assert (
+        "Start with the relevant Ralph config files, then prefer top-level manifests, "
+        "automation files, or runtime guard files that actually exist."
+    ) in prompt_value
     assert "Check only at the end visually that all buttons are legible." in prompt_value
     assert inline_directive in prompt_value
     assert prompt_value.index(
@@ -898,6 +902,8 @@ def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, mon
     assert (loop_dir / "tasks" / "01-setup-project.json").exists()
     assert (loop_dir / "PROGRESS.yaml").exists()
     assert (loop_dir / "product").exists()
+    updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert updated["verify_commands"] == []
     assert (loop_dir / "product" / "scripts" / "ralph" / "guard.sh").exists()
 
 

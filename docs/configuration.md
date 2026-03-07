@@ -25,7 +25,7 @@ You can still provide any of these paths explicitly in YAML to override the conv
 - `backends.init` or `backends.initialize` for init plan generation role (falls back to `inspector`, then `coder`)
 - `auth` map (`codex`, `copilot`, `claude`) with:
   - `env`: list of env vars to forward in Docker mode
-  - `mount`: list of host paths to mount inside backend containers
+  - `mount`: list of objects with `source` and `target`
 - `docker_run_args` for flow-specific Docker runtime flags:
   - `default`: applied to every `docker run`
   - `contexts`: applied by wrapper context (`base`, `init`, `code`, `inspect`, `review`, `visual`)
@@ -70,7 +70,9 @@ auth:
     mount: []
   copilot:
     env: []
-    mount: ["~/.config/gh"]
+    mount:
+      - source: ~/.config/gh
+        target: ~/.config/gh
 
 docker_run_args:
   default: ["--network", "bridge"]
@@ -93,3 +95,22 @@ agent_capabilities:
     type: builtin
     instruction: "Use Playwright scripts for deterministic UI checks when needed."
 ```
+
+## Auth mount format
+
+`auth.<engine>.mount` is a list of bind-mount declarations:
+
+```yaml
+auth:
+  codex:
+    env: []
+    mount:
+      - source: ~/.codex
+        target: ~/.codex
+```
+
+- `source`: host directory that contains the backend credentials or session files
+- `target`: destination path inside the container
+- `source` and `target` both support `~`
+- If `target` starts with `~/`, ralph-loop expands it against the home directory of the user running inside the container
+- Before mounting, ralph-loop copies the source directory into a temporary staging directory under `.ralph-tmp/`, so container writes do not modify the original host auth directory directly

@@ -1017,16 +1017,19 @@ def _invoke_docker_cli(
 
         mount_values = auth.get("mount")
         if isinstance(mount_values, list):
-            for mount_path in mount_values:
-                if not isinstance(mount_path, str):
+            for mount_entry in mount_values:
+                if not isinstance(mount_entry, dict):
                     continue
-                expanded = Path(mount_path).expanduser()
+                source_value = mount_entry.get("source")
+                target_value = mount_entry.get("target")
+                if not isinstance(source_value, str) or not isinstance(target_value, str):
+                    continue
+                expanded = Path(source_value).expanduser()
                 if not expanded.exists():
                     continue
-                if mount_path.startswith("~/"):
-                    container_target = Path("/home/ralph") / mount_path[2:]
-                else:
-                    container_target = expanded
+                if target_value.startswith("~/"):
+                    target_value = str(Path("/home/ralph") / target_value[2:])
+                container_target = Path(target_value)
                 command.extend(["-v", f"{expanded}:{container_target}"])
 
     container_prompt = Path("/workspace") / prompt_file.relative_to(workspace)
@@ -1314,8 +1317,7 @@ def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
     runtime_guards["post_code"] = post_code
     changed = changed or post_changed
 
-    verify_commands = _non_empty_verify_commands(raw_payload.get("verify_commands"))
-    if not verify_commands:
+    if "verify_commands" not in raw_payload or not isinstance(raw_payload.get("verify_commands"), list):
         raw_payload["verify_commands"] = [_DEFAULT_VERIFY_COMMAND]
         changed = True
 

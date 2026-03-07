@@ -571,8 +571,7 @@ Status (implemented in this repo):
 - `init` now auto-ensures unified-mode loop defaults in config:
   - `review_mode: unified_agent`
   - `backends.reviewer`
-  - `runtime_guards.pre_code` and `runtime_guards.post_code`
-- `init` also auto-creates/validates `.ralph-loop/guard.sh` and `.ralph-loop/verify-commands.txt` in the configured workspace.
+- `runtime_guards.pre_code` and `runtime_guards.post_code` must be declared explicitly in the config; `init` does not synthesize runtime guard commands or guard scripts.
 
 ### Step 5
 Deprecate but temporarily keep legacy `visual` and `inspect` parsing for backward compatibility.

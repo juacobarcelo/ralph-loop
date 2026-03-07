@@ -230,7 +230,7 @@ class BackendConfig(BaseModel):
 
 class AuthMountConfig(BaseModel):
     """One auth directory bind mount for Dockerized backends."""
-    source: str                          # Host directory, e.g. "~/.config/gh"
+    source: str                          # Host file or directory, e.g. "~/.config/gh"
     target: str                          # Container path, e.g. "~/.config/gh"
 
 class AuthConfig(BaseModel):
@@ -2115,7 +2115,7 @@ Not a Python CLI command — handled by the bash script directly.
 |---|---|---|
 | GitHub Copilot | `~/.config/gh/` | `mount: [{source: ~/.config/gh, target: ~/.config/gh}]` |
 | OpenAI Codex | `OPENAI_API_KEY` | Env var |
-| OpenAI Codex (account auth) | `~/.codex/` | `mount: [{source: ~/.codex, target: ~/.codex}]` |
+| OpenAI Codex (account auth) | `~/.codex/auth.json` | `mount: [{source: ~/.codex/auth.json, target: ~/.codex/auth.json}]` |
 | Anthropic Claude | `~/.claude/` + `ANTHROPIC_API_KEY` | Volume mount + env var |
 
 ---

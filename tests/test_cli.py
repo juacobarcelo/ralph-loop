@@ -983,7 +983,6 @@ def test_init_ensures_unified_config_defaults(sample_workspace: Path, monkeypatc
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     payload.pop("review_mode", None)
     payload["backends"].pop("reviewer", None)
-    payload.pop("runtime_guards", None)
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     _reset_init_outputs(config_path)
 
@@ -1042,14 +1041,14 @@ def test_init_ensures_unified_config_defaults(sample_workspace: Path, monkeypatc
     assert updated["runtime_guards"]["post_code"]["on_failure"] == "fail_attempt"
 
 
-def test_init_creates_guard_script_and_verify_file_in_workspace(
+def test_init_requires_explicit_runtime_guards(
     sample_workspace: Path, monkeypatch
 ) -> None:
-    _reset_init_outputs(sample_workspace / "ralph-config.yaml")
-    script_path = sample_workspace / ".ralph-loop" / "guard.sh"
-    verify_file = sample_workspace / ".ralph-loop" / "verify-commands.txt"
-    assert not script_path.exists()
-    assert not verify_file.exists()
+    config_path = sample_workspace / "ralph-config.yaml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload.pop("runtime_guards", None)
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    _reset_init_outputs(config_path)
 
     class _FakeBackend:
         def is_available(self) -> bool:
@@ -1089,18 +1088,11 @@ def test_init_creates_guard_script_and_verify_file_in_workspace(
             "--from",
             str(plan_path),
             "--config",
-            str(sample_workspace / "ralph-config.yaml"),
+            str(config_path),
         ],
     )
-    assert result.exit_code == 0
-    assert script_path.exists()
-    assert verify_file.exists()
-    assert (script_path.stat().st_mode & 0o111) != 0
-    content = script_path.read_text(encoding="utf-8")
-    assert "docker compose up -d" in content
-    assert "run_verify_checks" in content
-    verify_content = verify_file.read_text(encoding="utf-8")
-    assert "pnpm exec tsc --noEmit" in verify_content
+    assert result.exit_code != 0
+    assert "config.runtime_guards must be defined explicitly" in result.output
 
 
 def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, monkeypatch) -> None:
@@ -1115,6 +1107,18 @@ def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, mon
                 "backends": {
                     "coder": {"engine": "codex", "timeout_seconds": 60},
                     "inspector": {"engine": "copilot", "timeout_seconds": 60},
+                },
+                "runtime_guards": {
+                    "pre_code": {
+                        "command": "./.ralph-loop/guard.sh pre",
+                        "timeout_seconds": 120,
+                        "on_failure": "pause_loop",
+                    },
+                    "post_code": {
+                        "command": "./.ralph-loop/guard.sh post",
+                        "timeout_seconds": 120,
+                        "on_failure": "fail_attempt",
+                    },
                 },
                 "verify_commands": [],
                 "auth": {},
@@ -1174,7 +1178,110 @@ def test_init_uses_derived_loop_directory_with_global_config(tmp_path: Path, mon
     assert (loop_dir / "product").exists()
     updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert updated["verify_commands"] == []
-    assert (loop_dir / "product" / ".ralph-loop" / "guard.sh").exists()
+
+
+def test_init_skips_workspace_guard_generation_for_loop_local_runtime_guard(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    source_dir = workspace / "docs" / "feature"
+    loop_dir = source_dir / ".ralph-loop"
+    tasks_dir = loop_dir / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    guard_path = loop_dir / "guard.sh"
+    guard_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    guard_path.chmod(0o755)
+
+    progress_path = loop_dir / "PROGRESS.yaml"
+    progress_path.write_text(
+        yaml.safe_dump({"meta": {"title": "Demo", "started": "2026-03-01", "current_phase": 1}, "phases": []}),
+        encoding="utf-8",
+    )
+
+    config_path = loop_dir / "ralph-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "max_retries": 3,
+                "workspace_dir": str(workspace),
+                "progress_file": str(progress_path),
+                "task_dir": str(tasks_dir),
+                "pause_file": str(loop_dir / "PAUSE.md"),
+                "backends": {
+                    "init": {"engine": "codex", "timeout_seconds": 60},
+                    "coder": {"engine": "codex", "timeout_seconds": 60},
+                    "reviewer": {"engine": "copilot", "timeout_seconds": 60},
+                },
+                "review_mode": "unified_agent",
+                "runtime_guards": {
+                    "pre_code": {
+                        "command": "../guard.sh pre",
+                        "timeout_seconds": 120,
+                        "on_failure": "pause_loop",
+                    },
+                    "post_code": {
+                        "command": "../guard.sh post",
+                        "timeout_seconds": 120,
+                        "on_failure": "fail_attempt",
+                    },
+                },
+                "verify_commands": [],
+                "auth": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    _reset_init_outputs(config_path)
+
+    class _FakeBackend:
+        def is_available(self) -> bool:
+            return True
+
+        def execute(self, prompt: str, model=None, timeout_seconds=600, extra_flags=None, cwd=None):
+            _ = model, timeout_seconds, extra_flags, cwd
+            payload = {
+                "title": "Loop-local guard plan",
+                "phases": [
+                    {
+                        "id": 1,
+                        "name": "Phase 1",
+                        "tasks": [{"id": "01", "title": "Setup project"}],
+                    }
+                ],
+            }
+            _write_generated_plan_from_prompt(prompt, payload)
+
+            class _Result:
+                exit_code = 0
+                stdout = "generated plan file"
+                stderr = ""
+
+            return _Result()
+
+    monkeypatch.setattr("ralph_loop.cli.get_backend", lambda engine: _FakeBackend())
+
+    plan_path = source_dir / "feature-plan.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# Plan\n- [ ] Setup project", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "init",
+            "--from",
+            str(plan_path),
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert guard_path.exists()
+    assert not (workspace / ".ralph-loop" / "guard.sh").exists()
 
 
 def test_next_action_and_update_flow(sample_workspace: Path, monkeypatch) -> None:

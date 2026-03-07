@@ -16,6 +16,13 @@ def sample_workspace(tmp_path: Path) -> Path:
     task_file = tasks_dir / "01-task.md"
     task_file.write_text("# task", encoding="utf-8")
 
+    guard_dir = workspace / ".ralph-loop"
+    guard_dir.mkdir()
+    guard_script = guard_dir / "guard.sh"
+    guard_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    guard_script.chmod(0o755)
+    (guard_dir / "verify-commands.txt").write_text("echo ok\n", encoding="utf-8")
+
     progress = {
         "meta": {"title": "Demo", "started": "2026-03-01", "current_phase": 1},
         "phases": [
@@ -50,6 +57,18 @@ def sample_workspace(tmp_path: Path) -> Path:
         "backends": {
             "coder": {"engine": "codex", "model": "gpt-5.3-codex", "timeout_seconds": 600},
             "inspector": {"engine": "copilot", "timeout_seconds": 300},
+        },
+        "runtime_guards": {
+            "pre_code": {
+                "command": "./.ralph-loop/guard.sh pre",
+                "timeout_seconds": 180,
+                "on_failure": "pause_loop",
+            },
+            "post_code": {
+                "command": "./.ralph-loop/guard.sh post",
+                "timeout_seconds": 180,
+                "on_failure": "fail_attempt",
+            },
         },
         "auth": {"codex": {"env": ["OPENAI_API_KEY"], "mount": []}},
     }

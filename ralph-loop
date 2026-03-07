@@ -77,8 +77,9 @@ PY
 }
 
 prepare_auth_mount_staging_dir() {
-    local source_dir="$1"
+    local source_path="$1"
     local mount_path="$2"
+    local target_path="$3"
     local sanitized_mount
     local staging_dir
 
@@ -88,7 +89,15 @@ prepare_auth_mount_staging_dir() {
     rm -rf "$staging_dir"
     mkdir -p "$staging_dir"
     chmod 700 "$staging_dir"
-    cp -a "$source_dir"/. "$staging_dir"/
+
+    if [[ -d "$source_path" ]]; then
+        cp -a "$source_path"/. "$staging_dir"/
+    elif [[ -f "$source_path" ]]; then
+        cp -a "$source_path" "$staging_dir/$(basename "$target_path")"
+    else
+        return 1
+    fi
+
     printf '%s\n' "$staging_dir"
 }
 
@@ -98,7 +107,7 @@ append_auth_mounts_from_json() {
     local engine="$3"
     local container_home="$4"
     local auth_mount_array_name="$5"
-    local mount_entry mount_path target_path expanded container_target host_mount
+    local mount_entry mount_path target_path expanded container_target container_parent host_mount
     local -n auth_mount_array="$auth_mount_array_name"
 
     while IFS= read -r mount_entry; do
@@ -107,18 +116,24 @@ append_auth_mounts_from_json() {
         [[ -n "$mount_path" && -n "$target_path" ]] || continue
 
         expanded="${mount_path/#\~/$HOME}"
-        if [[ ! -d "$expanded" ]]; then
+        if [[ ! -e "$expanded" ]]; then
             continue
         fi
 
-        host_mount="$(prepare_auth_mount_staging_dir "$expanded" "$mount_path")"
         if [[ "$target_path" == "~/"* ]]; then
             container_target="${container_home}/${target_path:2}"
         else
             container_target="$target_path"
         fi
 
-        auth_mount_array+=("-v" "${host_mount}:${container_target}")
+        host_mount="$(prepare_auth_mount_staging_dir "$expanded" "$mount_path" "$target_path")"
+        if [[ -d "$expanded" ]]; then
+            auth_mount_array+=("-v" "${host_mount}:${container_target}")
+            continue
+        fi
+
+        container_parent="$(dirname "$container_target")"
+        auth_mount_array+=("-v" "${host_mount}:${container_parent}")
     done < <(jq -c "$jq_expr" "$json_file")
 }
 

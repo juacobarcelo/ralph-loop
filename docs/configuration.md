@@ -105,12 +105,13 @@ auth:
   codex:
     env: []
     mount:
-      - source: ~/.codex
-        target: ~/.codex
+      - source: ~/.codex/auth.json
+        target: ~/.codex/auth.json
 ```
 
-- `source`: host directory that contains the backend credentials or session files
+- `source`: host file or directory that contains the backend credentials or session files
 - `target`: destination path inside the container
 - `source` and `target` both support `~`
 - If `target` starts with `~/`, ralph-loop expands it against the home directory of the user running inside the container
-- Before mounting, ralph-loop copies the source directory into a temporary staging directory under `.ralph-tmp/`, so container writes do not modify the original host auth directory directly
+- Before mounting, ralph-loop copies the source into a temporary staging path under `.ralph-tmp/`, so container writes do not modify the original host auth material directly
+- If the source is a file, ralph-loop mounts the staged parent directory so the backend can keep ephemeral state alongside the credential file

@@ -1186,73 +1186,6 @@ def _derive_loop_dir_from_source(source: Path) -> Path:
     return source.parent / ".ralph-loop"
 
 
-_DEFAULT_PRE_GUARD_COMMAND = "./.ralph-loop/guard.sh pre"
-_DEFAULT_POST_GUARD_COMMAND = "./.ralph-loop/guard.sh post"
-_DEFAULT_GUARD_RELATIVE_PATH = Path(".ralph-loop/guard.sh")
-_DEFAULT_VERIFY_FILE_RELATIVE_PATH = Path(".ralph-loop/verify-commands.txt")
-_DEFAULT_VERIFY_COMMAND = "docker compose exec videntus-dev-server pnpm exec tsc --noEmit"
-_DEFAULT_GUARD_SCRIPT = """#!/usr/bin/env bash
-set -euo pipefail
-
-MODE="${1:-pre}"
-PROJECT_URL="${PROJECT_URL:-http://localhost:3001}"
-SERVICE_NAME="${SERVICE_NAME:-videntus-dev-server}"
-MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-45}"
-VERIFY_FILE="${VERIFY_FILE:-.ralph-loop/verify-commands.txt}"
-
-run_service_checks() {
-  docker compose up -d "$SERVICE_NAME" >/dev/null
-
-  for ((second=1; second<=MAX_WAIT_SECONDS; second++)); do
-    if curl -fsS "$PROJECT_URL" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
-
-  echo "guard failed: service '$SERVICE_NAME' did not become ready at '$PROJECT_URL' in ${MAX_WAIT_SECONDS}s" >&2
-  return 1
-}
-
-run_verify_checks() {
-  if [[ ! -f "$VERIFY_FILE" ]]; then
-    echo "guard failed: verify command file not found: $VERIFY_FILE" >&2
-    return 1
-  fi
-
-  local executed=0
-  while IFS= read -r cmd; do
-    [[ -z "$cmd" ]] && continue
-    [[ "$cmd" == \\#* ]] && continue
-    echo "[guard] verify -> $cmd"
-    bash -lc "$cmd"
-    executed=1
-  done < "$VERIFY_FILE"
-
-  if [[ "$executed" -eq 0 ]]; then
-    echo "guard failed: no verify commands configured in $VERIFY_FILE" >&2
-    return 1
-  fi
-}
-
-case "$MODE" in
-  pre)
-    run_service_checks
-    run_verify_checks
-    exit 0
-    ;;
-  post)
-    run_verify_checks
-    exit 0
-    ;;
-  *)
-    echo "guard failed: invalid mode '$MODE' (expected: pre|post)" >&2
-    exit 2
-    ;;
-esac
-"""
-
-
 def _normalized_backend_for_reviewer(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -1294,21 +1227,22 @@ def _default_reviewer_backend(backends: dict[str, Any]) -> dict[str, Any]:
 def _normalize_runtime_guard(
     raw: Any,
     *,
-    default_command: str,
+    phase_name: str,
     default_on_failure: str,
 ) -> tuple[dict[str, Any], bool]:
-    changed = False
-    guard: dict[str, Any]
-    if isinstance(raw, dict):
-        guard = dict(raw)
-    else:
-        guard = {}
-        changed = True
+    if not isinstance(raw, dict):
+        raise click.ClickException(
+            "config.runtime_guards."
+            f"{phase_name} must be defined explicitly; init will not create runtime guard defaults"
+        )
 
+    changed = False
+    guard = dict(raw)
     command = guard.get("command")
     if not isinstance(command, str) or not command.strip():
-        guard["command"] = default_command
-        changed = True
+        raise click.ClickException(
+            f"config.runtime_guards.{phase_name}.command must be defined explicitly"
+        )
 
     timeout_seconds = guard.get("timeout_seconds")
     if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
@@ -1321,48 +1255,6 @@ def _normalize_runtime_guard(
         changed = True
 
     return guard, changed
-
-
-def _non_empty_verify_commands(raw_value: Any) -> list[str]:
-    commands: list[str] = []
-    if not isinstance(raw_value, list):
-        return commands
-    for value in raw_value:
-        if isinstance(value, str):
-            normalized = value.strip()
-            if normalized:
-                commands.append(normalized)
-    return commands
-
-
-def _ensure_guard_assets(config: RalphConfig) -> tuple[Path, Path]:
-    workspace = Path(config.workspace_dir).expanduser().resolve()
-    guard_path = (workspace / _DEFAULT_GUARD_RELATIVE_PATH).resolve()
-    verify_file_path = (workspace / _DEFAULT_VERIFY_FILE_RELATIVE_PATH).resolve()
-    guard_path.parent.mkdir(parents=True, exist_ok=True)
-    verify_file_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if guard_path.exists() and not guard_path.is_file():
-        raise click.ClickException(f"Guard path is not a file: {guard_path}")
-
-    if not guard_path.exists() or not guard_path.read_text(encoding="utf-8").strip():
-        click.echo(f"[init] Writing runtime guard script: {guard_path}")
-        guard_path.write_text(_DEFAULT_GUARD_SCRIPT, encoding="utf-8")
-
-    mode = guard_path.stat().st_mode
-    if (mode & 0o111) == 0:
-        guard_path.chmod(mode | 0o755)
-        click.echo(f"[init] Marked runtime guard script as executable: {guard_path}")
-
-    verify_commands = _non_empty_verify_commands(config.verify_commands)
-    if not verify_commands:
-        verify_commands = [_DEFAULT_VERIFY_COMMAND]
-
-    if not verify_file_path.exists() or not verify_file_path.read_text(encoding="utf-8").strip():
-        click.echo(f"[init] Writing verify command file: {verify_file_path}")
-        verify_file_path.write_text("\n".join(verify_commands) + "\n", encoding="utf-8")
-
-    return guard_path, verify_file_path
 
 
 def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
@@ -1425,13 +1317,13 @@ def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
 
     runtime_guards = raw_payload.get("runtime_guards")
     if not isinstance(runtime_guards, dict):
-        runtime_guards = {}
-        raw_payload["runtime_guards"] = runtime_guards
-        changed = True
+        raise click.ClickException(
+            "config.runtime_guards must be defined explicitly; init will not create runtime guard defaults"
+        )
 
     pre_code, pre_changed = _normalize_runtime_guard(
         runtime_guards.get("pre_code"),
-        default_command=_DEFAULT_PRE_GUARD_COMMAND,
+        phase_name="pre_code",
         default_on_failure="pause_loop",
     )
     runtime_guards["pre_code"] = pre_code
@@ -1439,7 +1331,7 @@ def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
 
     post_code, post_changed = _normalize_runtime_guard(
         runtime_guards.get("post_code"),
-        default_command=_DEFAULT_POST_GUARD_COMMAND,
+        phase_name="post_code",
         default_on_failure="fail_attempt",
     )
     runtime_guards["post_code"] = post_code
@@ -1455,7 +1347,6 @@ def _ensure_config(config_path: Path, *, loop_dir: Path) -> RalphConfig:
         config_path.write_text(yaml.safe_dump(raw_payload, sort_keys=False), encoding="utf-8")
 
     config = RalphConfig.load(str(config_path), loop_dir=str(loop_dir))
-    _ensure_guard_assets(config)
     return config
 
 

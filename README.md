@@ -398,8 +398,8 @@ auth:
   codex:
     env: []
     mount:
-      - source: ~/.codex
-        target: ~/.codex
+      - source: ~/.codex/auth.json
+        target: ~/.codex/auth.json
 ```
 
 Both methods can be combined. When both are present, the Codex CLI uses the API key first. In **native mode** (`uvx ralph-loop run` without `--sandbox docker`), Codex inherits the host environment directly, so any method that works on your host works automatically.
@@ -460,19 +460,20 @@ The `auth` section in `ralph-config.yaml` controls what gets passed into Docker 
 
 - **`env`** — environment variables forwarded with `-e`. If the variable is set on the host, it's injected into the container. If not set, it's silently skipped.
 - **`mount`** — list of objects with:
-  - `source`: host directory to stage and mount into the container
+  - `source`: host file or directory to stage and mount into the container
   - `target`: destination path inside the container
 - `source` and `target` both support `~` expansion.
 - If `target` starts with `~/`, ralph-loop resolves it against the home directory of the user running inside the container.
-- Auth mounts are staged through a temporary copy under `.ralph-tmp/` before `docker run`, so backend tools never write back into the original host auth directory directly.
+- Auth mounts are staged through a temporary copy under `.ralph-tmp/` before `docker run`, so backend tools never write back into the original host auth material directly.
+- File mounts are staged into a writable parent directory inside the container so the backend can keep ephemeral state next to the credential file without touching the host copy.
 
 ```yaml
 auth:
   codex:
     env: [OPENAI_API_KEY]
     mount:
-      - source: ~/.codex
-        target: ~/.codex
+      - source: ~/.codex/auth.json
+        target: ~/.codex/auth.json
   copilot:
     env: []
     mount:
@@ -485,7 +486,7 @@ auth:
         target: ~/.claude
 ```
 
-Example: `target: ~/.codex` becomes something like `/home/ralph/.codex` inside the container, depending on the container user configured by the runtime.
+Example: `target: ~/.codex/auth.json` becomes something like `/home/ralph/.codex/auth.json` inside the container, depending on the container user configured by the runtime.
 
 In **native mode** (no Docker), the `auth` section is ignored — backends inherit the full host environment and filesystem, so all authentication methods that work on the host work automatically.
 
@@ -493,7 +494,7 @@ In **native mode** (no Docker), the `auth` section is ignored — backends inher
 
 | Backend | Env Variable | Config Directory | Needs Interactive Login? |
 |---|---|---|---|
-| **Codex** | `OPENAI_API_KEY` | `~/.codex` | Only for account auth (`codex auth`) |
+| **Codex** | `OPENAI_API_KEY` | `~/.codex/auth.json` | Only for account auth (`codex auth`) |
 | **Copilot** | — | `~/.config/gh` | Yes (`gh auth login`) |
 | **Claude** | `ANTHROPIC_API_KEY` | `~/.claude` | Only for account auth (`claude auth`) |
 

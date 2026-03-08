@@ -405,14 +405,14 @@ def _capability_backend_flags(
                 step=step,
             )
         )
-    return _dedupe_strings(flags)
+    return flags
 
 
 def _merge_flags(*flag_groups: list[str]) -> list[str]:
     merged: list[str] = []
     for group in flag_groups:
         merged.extend(group)
-    return _dedupe_strings(merged)
+    return merged
 
 
 def _validate_task_capability_ids(task_doc: TaskJson, config: RalphConfig) -> list[str]:

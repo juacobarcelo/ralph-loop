@@ -1898,7 +1898,16 @@ def test_emit_code_action_includes_capability_flags(sample_workspace: Path) -> N
             "type": "mcp",
             "instruction": "Use Chrome MCP when browser inspection is required.",
             "backend_flags": {
-                "codex": {"code": ["--config", "mcp_servers.chrome-devtools=enabled"]}
+                "codex": {
+                    "code": [
+                        "--config",
+                        'mcp_servers.chrome-devtools.command="node"',
+                        "--config",
+                        'mcp_servers.chrome-devtools.args=["/workspace/ralph-loop/docker/chrome-mcp-proxy.js"]',
+                        "--config",
+                        "mcp_servers.chrome-devtools.enabled=true",
+                    ]
+                }
             },
         }
     }
@@ -1940,9 +1949,15 @@ def test_emit_code_action_includes_capability_flags(sample_workspace: Path) -> N
 
     assert action["command"] == "code"
     assert action["capabilities"] == ["chrome-devtools"]
-    assert "--config" in action["extra_flags"]
-    assert "mcp_servers.chrome-devtools=enabled" in action["extra_flags"]
-    assert '--config=model_reasoning_effort="high"' in action["extra_flags"]
+    assert action["extra_flags"] == [
+        '--config=model_reasoning_effort="high"',
+        "--config",
+        'mcp_servers.chrome-devtools.command="node"',
+        "--config",
+        'mcp_servers.chrome-devtools.args=["/workspace/ralph-loop/docker/chrome-mcp-proxy.js"]',
+        "--config",
+        "mcp_servers.chrome-devtools.enabled=true",
+    ]
 
 
 def test_emit_review_action_includes_capability_flags_and_prompt_context(
@@ -1961,7 +1976,16 @@ def test_emit_review_action_includes_capability_flags_and_prompt_context(
             "type": "mcp",
             "instruction": "Use Chrome MCP to inspect UI state when acceptance requires it.",
             "backend_flags": {
-                "codex": {"review": ["--config", "mcp_servers.chrome-devtools=enabled"]}
+                "codex": {
+                    "review": [
+                        "--config",
+                        'mcp_servers.chrome-devtools.command="node"',
+                        "--config",
+                        'mcp_servers.chrome-devtools.args=["/workspace/ralph-loop/docker/chrome-mcp-proxy.js"]',
+                        "--config",
+                        "mcp_servers.chrome-devtools.enabled=true",
+                    ]
+                }
             },
         }
     }
@@ -2014,8 +2038,15 @@ def test_emit_review_action_includes_capability_flags_and_prompt_context(
     assert "`chrome-devtools` (mcp)" in prompt
     assert action["command"] == "review"
     assert action["capabilities"] == ["chrome-devtools"]
-    assert "--config" in action["extra_flags"]
-    assert "mcp_servers.chrome-devtools=enabled" in action["extra_flags"]
+    assert action["extra_flags"] == [
+        '--config=model_reasoning_effort="high"',
+        "--config",
+        'mcp_servers.chrome-devtools.command="node"',
+        "--config",
+        'mcp_servers.chrome-devtools.args=["/workspace/ralph-loop/docker/chrome-mcp-proxy.js"]',
+        "--config",
+        "mcp_servers.chrome-devtools.enabled=true",
+    ]
 
 
 def test_build_reviewer_prompt_omits_files_to_touch_section(sample_workspace: Path) -> None:

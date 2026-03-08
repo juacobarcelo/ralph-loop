@@ -2495,6 +2495,175 @@ def test_update_command_unified_fails_on_runtime_post_without_missing_review(
     )
 
 
+def test_update_command_unified_outputs_commit_metadata_for_completed(sample_workspace: Path) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["review_mode"] = "unified_agent"
+    config_payload["backends"]["reviewer"] = {
+        "engine": "codex",
+        "model": "gpt-5.4-codex",
+        "timeout_seconds": 300,
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+    config = RalphConfig.load(str(config_path))
+
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+
+    progress = load_progress(config.progress_file)
+    progress.phases[0].tasks[0].status = TaskStatus.IN_PROGRESS
+    save_progress(progress, config.progress_file)
+
+    iteration = {
+        "task_id": "01",
+        "current_step": "update",
+        "started_at": "2026-03-01T00:00:00Z",
+        "task_base_sha": "abc123",
+        "runtime_pre_ok": True,
+        "results": [
+            {"step": "runtime_pre_code", "task_id": "01", "exit_code": 0},
+            {"step": "code", "task_id": "01", "exit_code": 0},
+            {
+                "step": "review",
+                "task_id": "01",
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {"verdict": "pass", "methods_used": ["diff"], "feedback": "ok", "findings": []}
+                ),
+            },
+        ],
+    }
+    (tmp_dir / "iteration-state.json").write_text(json.dumps(iteration), encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["update", "--config", str(config_path), "--result-dir", str(tmp_dir)],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["step"] == "update"
+    assert payload["commit_required"] is True
+    assert payload["commit_mode"] == "approved_task"
+    assert payload["task_status_after_update"] == "completed"
+    assert payload["progress_file"] == config.progress_file
+
+
+def test_update_command_unified_outputs_commit_metadata_for_failed_attempt(
+    sample_workspace: Path,
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["review_mode"] = "unified_agent"
+    config_payload["backends"]["reviewer"] = {
+        "engine": "codex",
+        "model": "gpt-5.4-codex",
+        "timeout_seconds": 300,
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+    config = RalphConfig.load(str(config_path))
+
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+
+    progress = load_progress(config.progress_file)
+    progress.phases[0].tasks[0].status = TaskStatus.IN_PROGRESS
+    save_progress(progress, config.progress_file)
+
+    iteration = {
+        "task_id": "01",
+        "current_step": "update",
+        "started_at": "2026-03-01T00:00:00Z",
+        "task_base_sha": "abc123",
+        "runtime_pre_ok": True,
+        "results": [
+            {"step": "runtime_pre_code", "task_id": "01", "exit_code": 0},
+            {"step": "code", "task_id": "01", "exit_code": 0},
+            {
+                "step": "review",
+                "task_id": "01",
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "verdict": "fail",
+                        "methods_used": ["diff"],
+                        "feedback": "missing behavior",
+                        "findings": ["AC4 not met"],
+                    }
+                ),
+            },
+        ],
+    }
+    (tmp_dir / "iteration-state.json").write_text(json.dumps(iteration), encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["update", "--config", str(config_path), "--result-dir", str(tmp_dir)],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["step"] == "update"
+    assert payload["commit_required"] is True
+    assert payload["commit_mode"] == "progress_only_failed_attempt"
+    assert payload["task_status_after_update"] == "failed"
+
+
+def test_next_action_emits_commit_after_update_step_without_iteration(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["review_mode"] = "unified_agent"
+    config_payload["backends"]["reviewer"] = {
+        "engine": "codex",
+        "model": "gpt-5.4-codex",
+        "timeout_seconds": 300,
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    step_result = tmp_dir / "step-result.json"
+    step_result.write_text(
+        json.dumps(
+            {
+                "step": "update",
+                "task_id": "01",
+                "task_title": "Task 01",
+                "task_status_after_update": "completed",
+                "commit_required": True,
+                "commit_mode": "approved_task",
+                "progress_file": str(sample_workspace / "PROGRESS.yaml"),
+                "latest_feedback_summary": "Task completed successfully.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["next-action", "--config", str(config_path), "--step-result", str(step_result)],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["command"] == "commit"
+    assert payload["task_id"] == "01"
+    assert payload["commit_mode"] == "approved_task"
+    assert payload["image"] == "ralph-loop-codex"
+
+
 def test_build_inspector_prompt_includes_failure_gates() -> None:
     class _Task:
         id = "01"

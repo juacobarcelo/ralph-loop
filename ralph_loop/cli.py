@@ -192,6 +192,7 @@ class _Paths:
     coder_prompt_path: Path
     inspector_prompt_path: Path
     reviewer_prompt_path: Path
+    commit_prompt_path: Path
 
 
 def _runtime_paths(config: RalphConfig) -> _Paths:
@@ -203,6 +204,7 @@ def _runtime_paths(config: RalphConfig) -> _Paths:
         coder_prompt_path=tmp_dir / "coder-prompt.md",
         inspector_prompt_path=tmp_dir / "inspector-prompt.md",
         reviewer_prompt_path=tmp_dir / "reviewer-prompt.md",
+        commit_prompt_path=tmp_dir / "commit-prompt.md",
     )
 
 
@@ -631,6 +633,53 @@ def _capture_git_diff_since(workspace_dir: str, base_sha: str | None) -> str:
     if len(diff_text) <= 120_000:
         return diff_text
     return diff_text[-120_000:]
+
+
+def _summarize_feedback_sources(sources: list[FeedbackSource]) -> str:
+    if not sources:
+        return "Task completed successfully."
+    chunks: list[str] = []
+    for source in sources:
+        detail = (source.details or "").strip()
+        if detail:
+            chunks.append(f"{source.type}: {detail}")
+        else:
+            chunks.append(f"{source.type}: {source.verdict}")
+    summary = " | ".join(chunks)
+    if len(summary) <= 500:
+        return summary
+    return summary[:497] + "..."
+
+
+def _emit_commit_action(
+    *,
+    task_id: str,
+    task_title: str,
+    commit_mode: str,
+    progress_file: str,
+    latest_feedback_summary: str,
+    config: RalphConfig,
+) -> dict[str, Any]:
+    reviewer_role = _review_backend_role(config)
+    reviewer_cfg = config.get_backend(reviewer_role)
+    extra_flags = _with_dynamic_codex_reasoning(
+        reviewer_cfg,
+        step="review",
+        task_retries=0,
+    )
+    return {
+        "command": "commit",
+        "task_id": task_id,
+        "task_title": task_title,
+        "commit_mode": commit_mode,
+        "progress_file": progress_file,
+        "latest_feedback_summary": latest_feedback_summary,
+        "image": f"ralph-loop-{reviewer_cfg.engine}",
+        "model": reviewer_cfg.model,
+        "timeout_seconds": reviewer_cfg.timeout_seconds,
+        "extra_flags": extra_flags,
+        "auth": config.get_auth(reviewer_cfg.engine).model_dump(),
+    }
 
 
 def _task_review_context(task: Any, config: RalphConfig) -> dict[str, Any]:
@@ -2312,6 +2361,43 @@ def next_action_command(config_path: str, loop_dir: str, step_result_path: str |
 
     iteration = _load_iteration_state(paths.iteration_path)
     step_result = _extract_step_result(step_result_path)
+    if iteration is None and isinstance(step_result, dict):
+        step_name = str(step_result.get("step", ""))
+        if step_name == "update":
+            if bool(step_result.get("commit_required")):
+                task_id = str(step_result.get("task_id", "")).strip()
+                task_title = str(step_result.get("task_title", "")).strip() or task_id
+                commit_mode = str(step_result.get("commit_mode", "none")).strip()
+                progress_file = str(step_result.get("progress_file", config.progress_file)).strip()
+                latest_feedback_summary = str(
+                    step_result.get("latest_feedback_summary", "Task updated.")
+                ).strip()
+                click.echo(
+                    json.dumps(
+                        _emit_commit_action(
+                            task_id=task_id,
+                            task_title=task_title,
+                            commit_mode=commit_mode,
+                            progress_file=progress_file,
+                            latest_feedback_summary=latest_feedback_summary,
+                            config=config,
+                        )
+                    )
+                )
+                return
+        elif step_name == "commit":
+            if int(step_result.get("exit_code", 1)) != 0:
+                click.echo(
+                    json.dumps(
+                        {
+                            "command": "abort",
+                            "task_id": str(step_result.get("task_id", "")),
+                            "reason": "commit_failed",
+                        }
+                    )
+                )
+                return
+
     if iteration is not None and step_result is not None:
         _append_step_result(iteration, step_result)
 
@@ -3119,8 +3205,33 @@ def update_command(config_path: str, loop_dir: str, result_dir: str) -> None:
         )
         fail_task(progress, task.id, entry, config.max_retries)
 
+    status_after_update = task.status.value
+    commit_required = False
+    commit_mode = "none"
+    if status_after_update == TaskStatus.COMPLETED.value:
+        commit_required = True
+        commit_mode = "approved_task"
+    elif status_after_update == TaskStatus.FAILED.value:
+        commit_required = True
+        commit_mode = "progress_only_failed_attempt"
+
+    latest_feedback_summary = _summarize_feedback_sources(feedback_sources)
     save_progress(progress, config.progress_file)
     _clear_iteration_state(paths.iteration_path)
+    click.echo(
+        json.dumps(
+            {
+                "step": "update",
+                "task_id": task.id,
+                "task_title": task.title,
+                "task_status_after_update": status_after_update,
+                "commit_required": commit_required,
+                "commit_mode": commit_mode,
+                "progress_file": config.progress_file,
+                "latest_feedback_summary": latest_feedback_summary,
+            }
+        )
+    )
 
 
 @main.command("reset")

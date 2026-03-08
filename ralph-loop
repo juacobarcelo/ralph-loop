@@ -539,6 +539,106 @@ build_backend_args() {
     done < <(jq -r '.extra_flags[]? // empty' "$RALPH_TMP/next-action.json")
 }
 
+stage_commit_changes() {
+    local commit_mode="$1"
+    local progress_file_raw="$2"
+    local progress_file_host=""
+
+    case "$commit_mode" in
+        approved_task)
+            git add -A :/
+            ;;
+        progress_only_failed_attempt)
+            progress_file_host="$(container_path_to_host_path "$progress_file_raw")"
+            if [[ ! -f "$progress_file_host" ]]; then
+                log_error "Commit stage: progress file not found for staging: $progress_file_host"
+                return 2
+            fi
+            git add -- "$progress_file_host"
+            ;;
+        *)
+            log_error "Commit stage: unsupported commit mode '$commit_mode'"
+            return 2
+            ;;
+    esac
+
+    return 0
+}
+
+write_commit_prompt() {
+    local prompt_file="$1"
+    local task_id="$2"
+    local task_title="$3"
+    local commit_mode="$4"
+    local latest_feedback_summary="$5"
+    local staged_name_status staged_stat
+
+    staged_name_status="$(git diff --cached --name-status)"
+    staged_stat="$(git diff --cached --stat)"
+
+    cat > "$prompt_file" <<EOF
+You are a senior engineer writing a git commit message.
+
+Output MUST be strict JSON only (no markdown, no code fences, no extra keys):
+{"subject":"<one-line subject>","body":"<optional multi-line body, can be empty>"}
+
+Rules:
+- Subject must be imperative and <= 72 chars.
+- Body is optional but recommended when context is useful.
+- Do not mention AI, tooling internals, or process chatter.
+- Describe only the staged changes.
+
+Context:
+- Task ID: ${task_id}
+- Task Title: ${task_title}
+- Commit mode: ${commit_mode}
+- Reviewer feedback summary: ${latest_feedback_summary}
+
+Staged files (name-status):
+${staged_name_status}
+
+Staged diff stat:
+${staged_stat}
+EOF
+}
+
+parse_commit_message_json() {
+    local raw_output_file="$1"
+    local parsed_output_file="$2"
+
+    python3 - "$raw_output_file" "$parsed_output_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+raw_path = Path(sys.argv[1])
+parsed_path = Path(sys.argv[2])
+raw_text = raw_path.read_text(encoding="utf-8").strip()
+if not raw_text:
+    raise SystemExit("empty commit message response")
+
+try:
+    payload = json.loads(raw_text)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"commit message response is not strict JSON: {exc}") from exc
+
+if not isinstance(payload, dict):
+    raise SystemExit("commit message response must be a JSON object")
+
+subject = payload.get("subject")
+body = payload.get("body", "")
+if not isinstance(subject, str) or not subject.strip():
+    raise SystemExit("commit message JSON requires non-empty string field 'subject'")
+if len(subject.strip()) > 72:
+    raise SystemExit("commit message subject exceeds 72 characters")
+if not isinstance(body, str):
+    raise SystemExit("commit message JSON field 'body' must be a string")
+
+normalized = {"subject": subject.strip(), "body": body.strip()}
+parsed_path.write_text(json.dumps(normalized), encoding="utf-8")
+PY
+}
+
 resolve_loop_dir_from_argument() {
     local loop_dir_input="$1"
     local normalized="${loop_dir_input%/}"
@@ -783,7 +883,117 @@ cmd_run() {
                 ;;
             update)
                 log_info "Task $TASK_ID: updating progress..."
-                run_base update --config "/workspace/$CONFIG" --loop-dir "/workspace/$LOOP_DIR" --result-dir "/workspace/$RALPH_TMP/"
+                UPDATE_STDOUT_FILE="$RALPH_TMP/update-stdout.txt"
+                UPDATE_STDERR_FILE="$RALPH_TMP/update-stderr.txt"
+                : > "$UPDATE_STDOUT_FILE"
+                : > "$UPDATE_STDERR_FILE"
+                set +e
+                run_base update \
+                    --config "/workspace/$CONFIG" \
+                    --loop-dir "/workspace/$LOOP_DIR" \
+                    --result-dir "/workspace/$RALPH_TMP/" \
+                    > >(tee "$UPDATE_STDOUT_FILE") \
+                    2> >(tee "$UPDATE_STDERR_FILE" >&2)
+                EXIT_CODE=$?
+                set -e
+                if [[ "$EXIT_CODE" -ne 0 ]]; then
+                    jq -n \
+                        --arg task "$TASK_ID" \
+                        --argjson exit "$EXIT_CODE" \
+                        --arg out "$(cat "$UPDATE_STDOUT_FILE")" \
+                        --arg err "$(cat "$UPDATE_STDERR_FILE")" \
+                        '{step:"update",task_id:$task,exit_code:$exit,stdout:$out,stderr:$err}' \
+                        > "$RALPH_TMP/step-result.json"
+                    log_error "Task $TASK_ID: update failed (exit $EXIT_CODE)"
+                else
+                    cp "$UPDATE_STDOUT_FILE" "$RALPH_TMP/step-result.json"
+                fi
+                ;;
+            commit)
+                IMAGE=$(jq -r '.image' "$RALPH_TMP/next-action.json")
+                COMMIT_MODE=$(jq -r '.commit_mode // "none"' "$RALPH_TMP/next-action.json")
+                PROGRESS_FILE=$(jq -r '.progress_file // empty' "$RALPH_TMP/next-action.json")
+                TASK_TITLE=$(jq -r '.task_title // empty' "$RALPH_TMP/next-action.json")
+                LATEST_FEEDBACK_SUMMARY=$(jq -r '.latest_feedback_summary // "No feedback summary provided."' "$RALPH_TMP/next-action.json")
+                COMMIT_SHA=""
+                COMMIT_EXIT=0
+                build_backend_args
+
+                log_info "Task $TASK_ID: commit stage (mode: $COMMIT_MODE)..."
+                set +e
+                stage_commit_changes "$COMMIT_MODE" "$PROGRESS_FILE"
+                STAGE_EXIT=$?
+                set -e
+                if [[ "$STAGE_EXIT" -ne 0 ]]; then
+                    COMMIT_EXIT=$STAGE_EXIT
+                    log_error "Task $TASK_ID: commit staging failed (exit $COMMIT_EXIT)"
+                elif git diff --cached --quiet; then
+                    COMMIT_EXIT=3
+                    log_error "Task $TASK_ID: commit stage found no staged changes for mode '$COMMIT_MODE'"
+                else
+                    COMMIT_PROMPT_FILE="$RALPH_TMP/commit-prompt.md"
+                    write_commit_prompt \
+                        "$COMMIT_PROMPT_FILE" \
+                        "$TASK_ID" \
+                        "$TASK_TITLE" \
+                        "$COMMIT_MODE" \
+                        "$LATEST_FEEDBACK_SUMMARY"
+
+                    COMMIT_STDOUT_FILE="$RALPH_TMP/commit-stdout.txt"
+                    COMMIT_STDERR_FILE="$RALPH_TMP/commit-stderr.txt"
+                    COMMIT_MESSAGE_JSON_FILE="$RALPH_TMP/commit-message.json"
+                    : > "$COMMIT_STDOUT_FILE"
+                    : > "$COMMIT_STDERR_FILE"
+                    : > "$COMMIT_MESSAGE_JSON_FILE"
+
+                    set +e
+                    run_review_cli "$IMAGE" review \
+                        --prompt-file "/workspace/$COMMIT_PROMPT_FILE" \
+                        "${BACKEND_ARGS[@]}" \
+                        > >(tee "$COMMIT_STDOUT_FILE") \
+                        2> >(tee "$COMMIT_STDERR_FILE" >&2)
+                    AGENT_EXIT=$?
+                    set -e
+
+                    if [[ "$AGENT_EXIT" -ne 0 ]]; then
+                        COMMIT_EXIT=$AGENT_EXIT
+                        log_error "Task $TASK_ID: commit message generation failed (exit $COMMIT_EXIT)"
+                    else
+                        set +e
+                        parse_commit_message_json "$COMMIT_STDOUT_FILE" "$COMMIT_MESSAGE_JSON_FILE"
+                        PARSE_EXIT=$?
+                        set -e
+                        if [[ "$PARSE_EXIT" -ne 0 ]]; then
+                            COMMIT_EXIT=4
+                            log_error "Task $TASK_ID: commit message parse failed (strict JSON required)"
+                        else
+                            SUBJECT=$(jq -r '.subject' "$COMMIT_MESSAGE_JSON_FILE")
+                            BODY=$(jq -r '.body' "$COMMIT_MESSAGE_JSON_FILE")
+                            set +e
+                            if [[ -n "$BODY" ]]; then
+                                git commit -m "$SUBJECT" -m "$BODY"
+                            else
+                                git commit -m "$SUBJECT"
+                            fi
+                            COMMIT_EXIT=$?
+                            set -e
+                            if [[ "$COMMIT_EXIT" -eq 0 ]]; then
+                                COMMIT_SHA=$(git rev-parse HEAD)
+                                log_info "Task $TASK_ID: commit created ($COMMIT_SHA)"
+                            else
+                                log_error "Task $TASK_ID: git commit failed (exit $COMMIT_EXIT)"
+                            fi
+                        fi
+                    fi
+                fi
+
+                jq -n \
+                    --arg task "$TASK_ID" \
+                    --arg mode "$COMMIT_MODE" \
+                    --arg sha "$COMMIT_SHA" \
+                    --argjson exit "$COMMIT_EXIT" \
+                    '{step:"commit",task_id:$task,exit_code:$exit,commit_mode:$mode,commit_sha:$sha}' \
+                    > "$RALPH_TMP/step-result.json"
                 ;;
             done)
                 REASON=$(jq -r '.reason // "all_completed"' "$RALPH_TMP/next-action.json")
@@ -792,7 +1002,17 @@ cmd_run() {
                 ;;
             abort)
                 REASON=$(jq -r '.reason // "max_retries_reached"' "$RALPH_TMP/next-action.json")
-                log_error "Task $TASK_ID aborted: $REASON"
+                case "$REASON" in
+                    runtime_pre_code_failed)
+                        log_error "Loop aborted: task $TASK_ID failed the pre_code runtime guard."
+                        ;;
+                    task_aborted)
+                        log_error "Loop aborted: task $TASK_ID is already marked aborted in progress state."
+                        ;;
+                    *)
+                        log_error "Loop aborted: task $TASK_ID aborted with reason: $REASON"
+                        ;;
+                esac
                 cleanup 1
                 ;;
             pause)

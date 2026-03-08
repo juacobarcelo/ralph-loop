@@ -683,6 +683,63 @@ resolve_loop_dir_from_argument() {
     LOOP_DIR="$normalized"
 }
 
+run_preflight_or_die() {
+    local loop_dir_raw="$1"
+    local config_raw="$2"
+    local loop_dir_host config_host loop_local_config progress_path
+    local -a dirty_lines=()
+    local index max_to_show total_dirty remaining
+
+    loop_dir_host="$(resolve_host_path "$loop_dir_raw")"
+    config_host="$(resolve_host_path "$config_raw")"
+    loop_local_config="$loop_dir_host/ralph-config.yaml"
+    progress_path="$loop_dir_host/PROGRESS.yaml"
+
+    if [[ ! -d "$loop_dir_host" ]]; then
+        log_error "Preflight failed: loop directory not found: $loop_dir_host"
+        exit 1
+    fi
+
+    if [[ ! -f "$progress_path" ]]; then
+        log_error "Preflight failed: missing PROGRESS.yaml in loop directory: $progress_path"
+        exit 1
+    fi
+
+    if [[ ! -f "$loop_local_config" ]]; then
+        log_error "Preflight failed: missing loop-local config file: $loop_local_config"
+        exit 1
+    fi
+
+    if [[ ! -f "$config_host" ]]; then
+        log_error "Preflight failed: config file not found: $config_host"
+        exit 1
+    fi
+
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        log_error "Preflight failed: current directory is not inside a git repository."
+        exit 1
+    fi
+
+    mapfile -t dirty_lines < <(git status --porcelain)
+    if [[ ${#dirty_lines[@]} -gt 0 ]]; then
+        log_error "Preflight failed: worktree must be clean before 'ralph-loop run'."
+        log_error "Commit, stash, or discard local changes and retry."
+        max_to_show=20
+        total_dirty=${#dirty_lines[@]}
+        if [[ "$total_dirty" -lt "$max_to_show" ]]; then
+            max_to_show="$total_dirty"
+        fi
+        for ((index=0; index<max_to_show; index++)); do
+            log_error "  ${dirty_lines[$index]}"
+        done
+        remaining=$((total_dirty - max_to_show))
+        if [[ "$remaining" -gt 0 ]]; then
+            log_error "  ... and $remaining more path(s)"
+        fi
+        exit 1
+    fi
+}
+
 cmd_run() {
     local args=("$@")
     if [[ ${#args[@]} -gt 0 && "${args[0]}" != -* ]]; then
@@ -693,6 +750,8 @@ cmd_run() {
         log_error "Unknown arguments for run: ${args[*]}"
         exit 1
     fi
+
+    run_preflight_or_die "$LOOP_DIR" "$CONFIG"
 
     ensure_image "base"
     for engine in $(run_base list-engines --config "/workspace/$CONFIG" 2>/dev/null); do

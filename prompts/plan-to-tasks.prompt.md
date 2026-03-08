@@ -25,7 +25,6 @@ Write the plan JSON to the output file path provided in the prompt, validate it 
             "service_urls": ["string"],
             "runtime_expectations": ["string"]
           },
-          "files_to_touch": ["string"],
           "files_not_to_touch": ["string"],
           "constraints": ["string"],
           "reference_impl": null
@@ -35,6 +34,8 @@ Write the plan JSON to the output file path provided in the prompt, validate it 
   ]
 }
 ```
+
+`files_to_touch` is deprecated in the unified flow and must be omitted.
 
 Plan:
 

@@ -11,7 +11,7 @@ This design changes `ralph-loop` from a fixed multi-phase verification pipeline:
 
 to a reviewer-driven orchestration model:
 
-`runtime_pre_code -> code -> runtime_post_code -> review -> update`
+`runtime_pre_code -> code -> runtime_post_code -> review -> update -> commit`
 
 Key properties:
 - `ralph-loop` remains an orchestrator, not a reviewer.
@@ -58,7 +58,6 @@ The orchestrator should only:
 - Encoding service topology directly into Ralph task files
 - Giving the reviewer write access to the repository
 - Requiring MCP for all review tasks
-- Solving per-task auto-commit in v1
 
 ## Proposed Flow
 
@@ -100,7 +99,7 @@ A dedicated reviewer agent decides how to inspect the work.
 The reviewer receives:
 - task metadata
 - acceptance criteria
-- touched file boundaries from the task contract
+- constraints and `files_not_to_touch` guidance from the task contract
 - `task_base_sha`
 - git diff from `task_base_sha` to the current workspace state
 - runtime context and any preflight results
@@ -126,6 +125,19 @@ Fail:
 - reviewer returns valid JSON with `verdict=fail`
 - reviewer output is invalid or missing
 - the reviewer process exits non-zero
+
+### 6. `commit`
+After `update`, the orchestrator decides whether a commit is required.
+
+Behavior:
+- if task status is `completed`, `commit_mode=approved_task` and staging is `git add -A :/`
+- if task status is `failed` with retries remaining, `commit_mode=progress_only_failed_attempt` and only `PROGRESS.yaml` is staged
+- if task status is `abort`, `commit_mode=none` and no commit stage runs
+
+Commit message contract:
+- the agent returns strict JSON only: `{"subject":"...","body":"..."}`
+- the orchestrator executes `git commit` algorithmically from that JSON
+- if commit message generation/parsing or `git commit` fails, loop state transitions to `abort` with `reason=commit_failed`
 
 ## Runtime Guard Contract
 
@@ -273,13 +285,12 @@ The reviewer receives the diff between:
 This works regardless of whether later versions of the loop introduce per-task commits.
 
 ### Commit Policy
-v1 recommendation:
+Current policy:
 - do not auto-commit before review
 - review the current working tree against `task_base_sha`
-
-If a future auto-commit policy is enabled:
-- commit only after a passing review
-- still compute the review diff using `task_base_sha`
+- run orchestrator-managed commit after `update`:
+  - `approved_task`: commit all staged task changes
+  - `progress_only_failed_attempt`: commit only `PROGRESS.yaml`
 
 ## Task Contract Changes
 
@@ -578,7 +589,6 @@ Deprecate but temporarily keep legacy `visual` and `inspect` parsing for backwar
 
 ## Open Decisions
 - Whether to keep a separate optional `evidence` stage for cheap automatic checks
-- Whether successful tasks should be auto-committed by the orchestrator in a future version
 - Whether the reviewer should run in the same Docker network as project services or always use `host.docker.internal`
 
 ## Recommendation
@@ -586,5 +596,6 @@ For v1 of this redesign:
 - remove mandatory `verify`
 - rely on `runtime_pre_code` and `runtime_post_code` for infra health
 - use a single reviewer agent with a read-only workspace
+- keep orchestrator-managed post-update commits (`approved_task` vs `progress_only_failed_attempt`)
 - preserve legacy task compatibility
 - ship behind `review_mode: unified_agent`

@@ -179,6 +179,21 @@ def test_validate_plan_command_rejects_destructive_verify_commands(sample_worksp
     assert "non-destructive" in result.output
 
 
+def test_build_prompt_omits_deprecated_files_to_touch_field(sample_workspace: Path) -> None:
+    config = RalphConfig.load(str(sample_workspace / "ralph-config.yaml"))
+    plan_output_path = sample_workspace / ".ralph-tmp" / "generated-plan.json"
+    prompt = cli_module._build_prompt(
+        config=config,
+        source_content="# demo plan",
+        plan_output_path=plan_output_path,
+        plan_validation_command="python -m ralph_loop validate-plan --plan-file generated-plan.json",
+        user_directives="",
+    )
+
+    assert '"files_to_touch"' not in prompt
+    assert '"files_not_to_touch"' in prompt
+
+
 def test_init_engine_prefers_init_role(sample_workspace: Path) -> None:
     config_path = sample_workspace / "ralph-config.yaml"
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -1832,6 +1847,48 @@ def test_build_coder_prompt_includes_task_capability_instructions(sample_workspa
     assert "Playwright checks for UI validation" in prompt
 
 
+def test_build_coder_prompt_retry_mentions_git_diff_and_omits_files_to_touch_header(
+    sample_workspace: Path,
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    task_file = sample_workspace / "tasks" / "01-retry.json"
+    task_file.write_text(
+        json.dumps(
+            {
+                "id": "01",
+                "title": "Retry Prompt Test",
+                "phase": 1,
+                "coding": {
+                    "description": "Ensure retry guidance references git diff.",
+                    "acceptance_criteria": ["Retry guidance must be present."],
+                    "files_to_touch": ["src/retry.py"],
+                    "files_not_to_touch": ["src/core.py"],
+                    "constraints": [],
+                    "reference_impl": None,
+                },
+                "verify": {"commands": []},
+                "inspect": {"acceptance_criteria": [], "description_summary": "Retry prompt"},
+                "agent_capabilities": {"code": [], "review": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    task = progress.phases[0].tasks[0]
+    task.task_file = str(task_file)
+    task.retries = 1
+    save_progress(progress, str(sample_workspace / "PROGRESS.yaml"))
+
+    config = RalphConfig.load(str(config_path))
+    task = load_progress(str(sample_workspace / "PROGRESS.yaml")).phases[0].tasks[0]
+
+    prompt = cli_module._build_coder_prompt(task, config)
+
+    assert "Run `git diff` first to inspect previously rejected edits" in prompt
+    assert "## Files to Create/Modify" not in prompt
+
+
 def test_emit_code_action_includes_capability_flags(sample_workspace: Path) -> None:
     config_path = sample_workspace / "ralph-config.yaml"
     config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -1958,6 +2015,30 @@ def test_emit_review_action_includes_capability_flags_and_prompt_context(
     assert action["capabilities"] == ["chrome-devtools"]
     assert "--config" in action["extra_flags"]
     assert "mcp_servers.chrome-devtools=enabled" in action["extra_flags"]
+
+
+def test_build_reviewer_prompt_omits_files_to_touch_section(sample_workspace: Path) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["review_mode"] = "unified_agent"
+    config_payload["backends"]["reviewer"] = {
+        "engine": "codex",
+        "model": "gpt-5.4-codex",
+        "timeout_seconds": 300,
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+    config = RalphConfig.load(str(config_path))
+
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    task = progress.phases[0].tasks[0]
+    prompt = cli_module._build_reviewer_prompt(
+        task=task,
+        config=config,
+        iteration={"task_id": "01", "results": [], "task_base_sha": "abc123"},
+    )
+
+    assert "## Files To Touch" not in prompt
+    assert "Do not fail automatically for \"scope drift\"" in prompt
 
 
 def test_emit_code_action_fails_when_task_references_unknown_capability(
@@ -2609,6 +2690,67 @@ def test_update_command_unified_outputs_commit_metadata_for_failed_attempt(
     assert payload["task_status_after_update"] == "failed"
 
 
+def test_update_command_unified_outputs_no_commit_metadata_for_abort(
+    sample_workspace: Path,
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["review_mode"] = "unified_agent"
+    config_payload["max_retries"] = 1
+    config_payload["backends"]["reviewer"] = {
+        "engine": "codex",
+        "model": "gpt-5.4-codex",
+        "timeout_seconds": 300,
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    progress.phases[0].tasks[0].status = TaskStatus.IN_PROGRESS
+    progress.phases[0].tasks[0].retries = 0
+    save_progress(progress, str(sample_workspace / "PROGRESS.yaml"))
+
+    iteration = {
+        "task_id": "01",
+        "current_step": "update",
+        "started_at": "2026-03-01T00:00:00Z",
+        "task_base_sha": "abc123",
+        "runtime_pre_ok": True,
+        "results": [
+            {"step": "runtime_pre_code", "task_id": "01", "exit_code": 0},
+            {"step": "code", "task_id": "01", "exit_code": 0},
+            {
+                "step": "review",
+                "task_id": "01",
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "verdict": "fail",
+                        "methods_used": ["diff"],
+                        "feedback": "still broken",
+                        "findings": ["AC1 missing"],
+                    }
+                ),
+            },
+        ],
+    }
+    (tmp_dir / "iteration-state.json").write_text(json.dumps(iteration), encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["update", "--config", str(config_path), "--result-dir", str(tmp_dir)],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["step"] == "update"
+    assert payload["commit_required"] is False
+    assert payload["commit_mode"] == "none"
+    assert payload["task_status_after_update"] == "abort"
+
+
 def test_next_action_emits_commit_after_update_step_without_iteration(
     sample_workspace: Path, monkeypatch
 ) -> None:
@@ -2662,6 +2804,103 @@ def test_next_action_emits_commit_after_update_step_without_iteration(
     assert payload["task_id"] == "01"
     assert payload["commit_mode"] == "approved_task"
     assert payload["image"] == "ralph-loop-codex"
+
+
+def test_next_action_aborts_when_commit_step_failed_without_iteration(
+    sample_workspace: Path, monkeypatch
+) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["review_mode"] = "unified_agent"
+    config_payload["backends"]["reviewer"] = {
+        "engine": "codex",
+        "model": "gpt-5.4-codex",
+        "timeout_seconds": 300,
+    }
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    step_result = tmp_dir / "step-result.json"
+    step_result.write_text(
+        json.dumps(
+            {
+                "step": "commit",
+                "task_id": "01",
+                "exit_code": 4,
+                "commit_mode": "approved_task",
+                "commit_sha": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["next-action", "--config", str(config_path), "--step-result", str(step_result)],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["command"] == "abort"
+    assert payload["task_id"] == "01"
+    assert payload["reason"] == "commit_failed"
+
+
+def test_next_action_advances_after_successful_commit_step(sample_workspace: Path, monkeypatch) -> None:
+    config_path = sample_workspace / "ralph-config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["review_mode"] = "unified_agent"
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    progress = load_progress(str(sample_workspace / "PROGRESS.yaml"))
+    progress.phases[0].tasks[0].status = TaskStatus.COMPLETED
+    save_progress(progress, str(sample_workspace / "PROGRESS.yaml"))
+
+    config = RalphConfig.load(str(config_path))
+    original_exists = Path.exists
+
+    def _patched_exists(path: Path) -> bool:
+        if path.resolve() == Path(config.pause_file).resolve():
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr("ralph_loop.cli.Path.exists", _patched_exists)
+
+    tmp_dir = sample_workspace / ".ralph-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    step_result = tmp_dir / "step-result.json"
+    step_result.write_text(
+        json.dumps(
+            {
+                "step": "commit",
+                "task_id": "01",
+                "exit_code": 0,
+                "commit_mode": "approved_task",
+                "commit_sha": "deadbeef",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["next-action", "--config", str(config_path), "--step-result", str(step_result)],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["command"] == "done"
 
 
 def test_build_inspector_prompt_includes_failure_gates() -> None:

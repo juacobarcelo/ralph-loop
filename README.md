@@ -1,6 +1,6 @@
 # ralph-loop
 
-**AFK AI coding loop orchestrator** with multi-model-per-phase strategy, feedback accumulation across retries, and hybrid verification (deterministic + AI inspection + visual).
+**AFK AI coding loop orchestrator** with unified `coder -> reviewer -> update -> commit` flow, runtime guards, and structured retry feedback.
 
 Ships with 3 backends — **Codex**, **GitHub Copilot**, and **Claude Code** — and runs Docker-first for full isolation or natively via `uvx`.
 
@@ -44,28 +44,30 @@ Use the same `LOOP_DIR` for status/validation:
 ralph-loop takes a list of coding tasks (markdown files with YAML frontmatter) and iterates through them autonomously:
 
 1. **Select** the next task from `PROGRESS.yaml` (retry-first policy).
-2. **Code** — send the task + accumulated feedback to a coder backend (Codex, Copilot, or Claude).
-3. **Verify** — run _all_ verifiers on every attempt (deterministic commands, AI diff inspection, visual screenshot comparison).
-4. **Feedback** — on failure, append structured feedback and retry (up to `max_retries`).
-5. **Advance** — on success, mark the task complete and move to the next.
+2. **Runtime Preflight** — run host-side runtime guard before code.
+3. **Code** — send the task + accumulated feedback to a coder backend (Codex, Copilot, or Claude).
+4. **Runtime Post-check** — run host-side runtime guard after code.
+5. **Review** — send diff/runtime/task context to a dedicated reviewer backend.
+6. **Update** — persist pass/fail/abort decision in `PROGRESS.yaml`.
+7. **Commit** — commit staged changes automatically:
+  - pass -> stage all task changes
+  - fail with retries left -> stage only `PROGRESS.yaml`
+  - abort -> no commit stage
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-   Select Task ────▶  Code (AI)    ────▶  Verify (ALL)  ────▶  Pass / Fail  
-└─────────────┘     └──────────────┘     └──────────────┘     └──────┬───────┘
-       ▲                                                             │
-       └─────────────────── retry with feedback ◄────────────────────┘
+Select -> runtime_pre_code -> code -> runtime_post_code -> review -> update -> commit
 ```
 
 ### Features
 
-- **Multi-model per task phase** — use different AI backends for coding vs. inspection (e.g., Codex codes, Copilot reviews).
+- **Multi-model per task phase** — use different AI backends for coding vs. review (e.g., Codex codes, Copilot reviews).
 - **Feedback accumulation across retries** — every failed attempt appends structured feedback to the next prompt, so the AI learns from previous mistakes.
-- **AI-powered diff inspection** — an inspector backend reviews the git diff against acceptance criteria and returns a pass/fail verdict.
-- **Visual screenshot verification** — optional Playwright-based screenshot capture reviewed by AI, with or without a reference image.
-- **Run ALL verifiers every attempt** — deterministic tests, AI inspection, and visual checks all run regardless of individual failures, maximizing signal per retry.
+- **Unified reviewer stage** — a reviewer backend decides pass/fail from acceptance criteria + evidence (diff/runtime/browser when needed).
+- **Runtime guards** — pre-code and post-code host checks prevent sending infra failures to the reviewer.
+- **Automatic commit stage** — orchestrator-controlled commit after update, including progress-only commit on rejected attempts.
 - **Docker-isolated per-backend containers** — each AI CLI runs in its own container with only the credentials it needs. No Docker socket mount.
 - **Plan-to-tasks generation** — convert a markdown plan into structured task files and a PROGRESS.yaml tracker, using AI generation.
+- **Strict preflight before run** — loop refuses to start unless the git worktree is clean and loop files exist.
 - **Pause/resume** — drop a `PAUSE.md` file to pause the loop; remove it to resume.
 - **Retry-first scheduling** — failed tasks are retried before new tasks are started.
 - **Phase-based progression** — tasks are grouped into phases; the loop advances to the next phase when all tasks in the current phase are done or aborted.

@@ -24,7 +24,6 @@ Return STRICT JSON only with this schema:
           "test_plan": "string",
           "priority": "high|medium|low",
           "verify_commands": ["string"],
-          "files_to_touch": ["string"],
           "files_not_to_touch": ["string"],
           "constraints": ["string"],
           "reference_impl": null
@@ -38,6 +37,7 @@ Return STRICT JSON only with this schema:
 Rules:
 - Acceptance criteria must be specific and testable.
 - Keep tasks implementation-sized.
+- `files_to_touch` is deprecated and should be omitted from generated plans.
 - Use empty arrays where information is unknown.
 - Do not output markdown fences outside the JSON response.
 

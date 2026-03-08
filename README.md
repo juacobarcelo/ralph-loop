@@ -198,7 +198,7 @@ Use directives to control generated task metadata, not only prose. The generator
 frontmatter-compatible fields that drive the loop:
 
 - `acceptance_criteria`: concrete, testable checks.
-- `verify_commands`: deterministic, host-side, non-destructive checks that confirm environment health and code-level regressions.
+- `verify_commands`: optional deterministic, host-side, non-destructive checks. In `review_mode=unified_agent`, keep them empty by default and use `runtime_guards` plus reviewer runtime context for service/UI work.
 - `review`: runtime/service/browser review context (`focus`, `service_urls`, `runtime_expectations`) for the reviewer step.
 - `files_to_touch` / `files_not_to_touch`: implementation boundaries.
 - `constraints`: hard limits or guardrails for coding.
@@ -209,8 +209,8 @@ Directive examples that reliably shape output:
   - Expected effect: attach reviewer runtime context to the task that implements/renders the video list.
 - `Review only at the end visually that all buttons are displayed and legible.`
   - Expected effect: attach reviewer runtime context only to the final relevant task.
-- `Use verify_commands: python -m pytest -q tests and ruff check src`.
-  - Expected effect: include deterministic host-side checks in generated tasks.
+- `Keep verify_commands empty by default; if a task truly needs one, add only a fast, task-local host check.`
+  - Expected effect: generated tasks rely on runtime/reviewer context unless a deterministic command is explicitly justified.
 
 Tip for best results: keep plans focused on deliverables, and place strict behavioral constraints in
 directives so they override inferred defaults.
@@ -221,6 +221,7 @@ Create or edit global config (`$RALPH_CONFIG` or `~/.config/ralph-loop/config.ya
 
 ```yaml
 max_retries: 3
+review_mode: unified_agent
 
 backends:
   init:
@@ -231,14 +232,22 @@ backends:
     engine: codex
     model: gpt-5.3-codex
     timeout_seconds: 600
-  inspector:
-    engine: copilot
-    model: claude-opus-4-6
+  reviewer:
+    engine: codex
+    model: gpt-5.3-codex
     timeout_seconds: 300
 
-verify_commands:
-  - "python -m pytest tests/ -v"
-  - "ruff check src/"
+verify_commands: []
+
+runtime_guards:
+  pre_code:
+    command: "./.ralph-loop/guard.sh pre"
+    timeout_seconds: 60
+    on_failure: abort_loop
+  post_code:
+    command: "./.ralph-loop/guard.sh post"
+    timeout_seconds: 60
+    on_failure: fail_attempt
 
 auth:
   codex:
@@ -257,7 +266,7 @@ auth:
 CONFIG=~/.config/ralph-loop/config.yaml LOOP_DIR=.ralph-loop/my-project-plan ./ralph-loop run
 ```
 
-ralph-loop will work through each task, coding → verifying → retrying until all tasks are complete or aborted.
+ralph-loop will work through each task. In `unified_agent` mode the usual cadence is runtime pre-check → coding → runtime post-check → reviewer step → retry/update.
 
 ### 5. Monitor progress
 
@@ -510,8 +519,7 @@ Tasks are markdown files with YAML frontmatter:
 ---
 phase: 1
 priority: high
-verify_commands:
-  - "python -m pytest tests/test_api.py -v"
+verify_commands: []
 contract_file: null
 files_to_touch:
   - "src/api.py"
@@ -545,13 +553,14 @@ Create REST API endpoints for the user service.
 
 ## Verification Pipeline
 
-Every attempt runs **all three** verification stages — even if earlier stages fail. This maximizes feedback per retry.
+Every attempt can collect multiple verification signals, but the exact stages depend on loop mode and task data.
 
 | Stage | How It Works | When It Runs |
 |---|---|---|
-| **Deterministic** | Runs `verify_commands` via `bash -lc`, collects exit codes + output | Always |
-| **AI Inspection** | Sends git diff + criteria to inspector backend, expects `{"verdict":"pass\|fail","feedback":"..."}` | Always |
-| **Reviewer Runtime Checks** | Reviewer may use browser/runtime tooling against `review.service_urls` when acceptance criteria require it | When task `review` context warrants it |
+| **Deterministic** | Runs `verify_commands` via `bash -lc`, collects exit codes + output | Only when task/config verify commands are present |
+| **AI Inspection** | Sends git diff + criteria to inspector backend, expects `{"verdict":"pass\|fail","feedback":"..."}` | Legacy mode |
+| **Runtime Guards** | Runs orchestrator-owned `runtime_guards.pre_code/post_code` commands for service availability and post-code health | When configured, typically in `review_mode=unified_agent` |
+| **Reviewer Runtime Checks** | Reviewer may use browser/runtime tooling against `review.service_urls` when acceptance criteria require it | When task `review` context warrants it, typically in `review_mode=unified_agent` |
 
 ---
 

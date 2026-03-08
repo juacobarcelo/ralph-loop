@@ -2,7 +2,7 @@
 
 ## Scope
 
-`ralph-loop` now treats config as **global defaults** (engines, auth, retries, default verification).
+`ralph-loop` now treats config as **global defaults** (engines, auth, retries, optional deterministic verification).
 
 Runtime files are resolved from a loop directory (`--loop-dir`, default `.`):
 
@@ -20,7 +20,11 @@ You can still provide any of these paths explicitly in YAML to override the conv
 ## Optional
 
 - `max_retries` (default `3`)
+- `review_mode` (`legacy` or `unified_agent`; default `legacy`)
 - `verify_commands` (default `[]`)
+- `runtime_guards` for orchestrator-owned pre/post coding checks:
+  - `pre_code`: lightweight service availability for the coder; in unified loops this should fail fast if required services are down
+  - `post_code`: lightweight runtime health check after coding; if services are broken, prefer diagnostics over broad repo-wide verification
 - `project_instructions` (optional explicit path; if omitted, auto-detected from loop dir ancestors: `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`)
 - `backends.init` or `backends.initialize` for init plan generation role (falls back to `inspector`, then `coder`)
 - `auth` map (`codex`, `copilot`, `claude`) with:
@@ -46,6 +50,7 @@ You can still provide any of these paths explicitly in YAML to override the conv
 
 ```yaml
 max_retries: 3
+review_mode: unified_agent
 
 backends:
   init:
@@ -56,13 +61,22 @@ backends:
     engine: codex
     model: gpt-5.3-codex
     timeout_seconds: 600
-  inspector:
-    engine: copilot
-    model: claude-opus-4-6
+  reviewer:
+    engine: codex
+    model: gpt-5.3-codex
     timeout_seconds: 300
 
-verify_commands:
-  - "./bin/run-tests tests/"
+verify_commands: []
+
+runtime_guards:
+  pre_code:
+    command: "./.ralph-loop/guard.sh pre"
+    timeout_seconds: 60
+    on_failure: abort_loop
+  post_code:
+    command: "./.ralph-loop/guard.sh post"
+    timeout_seconds: 60
+    on_failure: fail_attempt
 
 auth:
   codex:
@@ -95,6 +109,14 @@ agent_capabilities:
     type: builtin
     instruction: "Use Playwright scripts for deterministic UI checks when needed."
 ```
+
+For `review_mode=unified_agent`, prefer this contract:
+
+- keep top-level `verify_commands: []`
+- keep task-level `verify_commands` empty by default
+- use `runtime_guards.pre_code` for coder-facing service availability
+- use `runtime_guards.post_code` for post-code runtime health and diagnostics
+- reserve heavier repo-wide typecheck/test suites for a separate acceptance step outside the loop
 
 ## Auth mount format
 

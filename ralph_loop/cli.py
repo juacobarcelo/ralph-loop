@@ -1485,19 +1485,6 @@ def _contains_runtime_review_instruction(text: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
-def _extract_verify_command_hint(source_text: str) -> str | None:
-    patterns = [
-        r"`(python\s+-m\s+pytest[^`]+)`",
-        r"`(pytest[^`]+)`",
-        r"`(ruff\s+check[^`]+)`",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, source_text, flags=re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-    return None
-
-
 def _dockerize_local_service_url(url: str) -> str:
     normalized = url.strip()
     replacements = {
@@ -1570,7 +1557,6 @@ def _merge_generated_review_context(
 
 
 def _apply_plan_hints(plan: GeneratedPlan, source_text: str) -> GeneratedPlan:
-    verify_hint = _extract_verify_command_hint(source_text)
     review_hint = _extract_review_context_hint(source_text)
 
     directive_text = source_text.lower()
@@ -1582,8 +1568,6 @@ def _apply_plan_hints(plan: GeneratedPlan, source_text: str) -> GeneratedPlan:
     for phase in plan.phases:
         for task in phase.tasks:
             flat_tasks.append(task)
-            if verify_hint and not task.verify_commands:
-                task.verify_commands = [verify_hint]
             if isinstance(task.review, dict) and any(
                 isinstance(task.review.get(key), list) and task.review.get(key)
                 for key in ("focus", "service_urls", "runtime_expectations")
@@ -2051,7 +2035,8 @@ def _collect_loop_check_errors(
         if raw_config.get("verify_commands") != []:
             errors.append(
                 "config.verify_commands should be [] for unified_agent loops; "
-                "checks belong in runtime guards"
+                "keep service availability/health in runtime guards and add task "
+                "verify_commands only when explicitly justified"
             )
 
         backends = raw_config.get("backends")
@@ -2090,6 +2075,12 @@ def _collect_loop_check_errors(
             for runtime_guard in (raw_config.get("runtime_guards") or {}).values()
             if isinstance(raw_config.get("runtime_guards"), dict) and isinstance(runtime_guard, dict)
         ]
+        for command in runtime_guard_commands:
+            if "../guard.sh" in command:
+                errors.append(
+                    "runtime guard commands must be resolvable from workspace root; "
+                    "do not use '../guard.sh'"
+                )
         loop_local_guard_referenced = any(
             "../guard.sh" in command
             or re.search(r"(^|[\"'\s])(?:\./)?guard\.sh(?:[\s\"']|$)", command)

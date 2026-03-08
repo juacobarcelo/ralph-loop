@@ -156,6 +156,7 @@ All agent output must be in English: code, comments, variable names, docstrings,
 
 - Group related changes into logical commits with conventional commit messages (e.g., `feat: add progress state machine`, `test: add config validation tests`).
 - Do not commit after every small change — commit when a coherent unit of work is complete.
+- In `review_mode=unified_agent`, keep runtime guards lightweight: `pre_code` for service availability, `post_code` for runtime health/diagnostics, and `verify_commands` empty by default unless a task-local deterministic check is explicitly required.
 - Always run lint + type check + tests before committing.
 - When implementing a phase, create all files for that phase before moving to the next.
 - When a decision requires clarification, ask — do not guess.

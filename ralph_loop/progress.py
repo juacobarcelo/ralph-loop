@@ -57,7 +57,13 @@ class TaskProgress(BaseModel):
     contract_file: str | None = None
     status: TaskStatus = TaskStatus.NOT_STARTED
     retries: int = 0
-    verify_commands: list[str] = Field(default_factory=list)
+    verify_commands: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Resolved deterministic host-side checks for the task. In "
+            "unified_agent loops this should usually remain empty."
+        ),
+    )
     visual_verify: VisualVerifyConfig | None = None
     feedback: list[FeedbackEntry] = Field(default_factory=list)
 

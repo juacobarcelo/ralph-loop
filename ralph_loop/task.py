@@ -186,7 +186,14 @@ class TaskFrontmatter(BaseModel):
 
     phase: int
     priority: str = "medium"
-    verify_commands: list[str] = Field(default_factory=list)
+    verify_commands: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional deterministic host-side checks for this task. Keep empty by "
+            "default in unified_agent loops unless a task-local command is "
+            "explicitly justified."
+        ),
+    )
     visual_verify: VisualVerifyConfig | None = None
     contract_file: str | None = None
     files_to_touch: list[str] = Field(default_factory=list)
@@ -235,7 +242,11 @@ class Task(BaseModel):
         )
 
     def get_verify_commands(self, defaults: list[str]) -> list[str]:
-        """Return task-specific verify commands or provided defaults."""
+        """Return task-specific verify commands or provided defaults.
+
+        Unified-agent loops should normally keep both task and config defaults
+        empty unless a task-local deterministic command was requested on purpose.
+        """
         return self.frontmatter.verify_commands or defaults
 
 

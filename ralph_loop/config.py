@@ -143,7 +143,13 @@ class VisualVerifyConfig(BaseModel):
 
 
 class RuntimeGuardConfig(BaseModel):
-    """Configuration for one orchestrator-owned runtime guard command."""
+    """Configuration for one orchestrator-owned runtime guard command.
+
+    In unified-agent loops, keep these commands lightweight:
+    - ``pre_code`` should prove required services are available to the coder.
+    - ``post_code`` should prove the coder did not break runtime health and emit
+      useful diagnostics when services are down.
+    """
 
     command: str
     timeout_seconds: int = 180
@@ -231,7 +237,14 @@ class RalphConfig(BaseModel):
     review_mode: str = "legacy"
 
     backends: dict[str, BackendConfig]
-    verify_commands: list[str] = Field(default_factory=list)
+    verify_commands: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Default deterministic host-side checks. For unified_agent loops, "
+            "prefer [] by default and keep service availability/health in "
+            "runtime_guards instead."
+        ),
+    )
     auth: dict[str, AuthConfig] = Field(default_factory=dict)
     project_instructions: str | None = None
     runtime_guards: RuntimeGuardsConfig = Field(default_factory=RuntimeGuardsConfig)

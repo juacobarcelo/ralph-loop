@@ -511,7 +511,9 @@ def test_init_command_ignores_stdout_and_requires_plan_file(
     assert "Generated plan file is invalid" in result.output
 
 
-def test_init_applies_verify_and_review_hints(sample_workspace: Path, monkeypatch) -> None:
+def test_init_applies_runtime_review_hints_without_injecting_verify_commands(
+    sample_workspace: Path, monkeypatch
+) -> None:
     config_path = sample_workspace / "ralph-config.yaml"
     _configure_review_capability(config_path)
     _reset_init_outputs(config_path)
@@ -591,12 +593,11 @@ Verification:
 
     progress = yaml.safe_load((sample_workspace / "PROGRESS.yaml").read_text(encoding="utf-8"))
     tasks = progress["phases"][0]["tasks"]
-    assert all(
-        task["verify_commands"] == ["python -m pytest -q ./tmp/product/tests"] for task in tasks
-    )
+    assert all(task["verify_commands"] == [] for task in tasks)
     generated_task = json.loads(
         (sample_workspace / "tasks" / "01-build-homepage.json").read_text(encoding="utf-8")
     )
+    assert generated_task["verify"]["commands"] == []
     assert generated_task["review"]["service_urls"] == ["http://host.docker.internal:3001"]
     assert generated_task["review"]["runtime_expectations"] == ["homepage title is visible."]
 

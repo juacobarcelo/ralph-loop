@@ -8,11 +8,6 @@
 {{ loop.index }}. {{ criterion }}
 {% endfor %}
 
-## Files to Create/Modify
-{% for file_path in files_to_touch %}
-- `{{ file_path }}`
-{% endfor %}
-
 {% if reference_impl %}
 ## Reference Implementation
 {{ reference_impl }}
@@ -47,6 +42,7 @@
 ## ⚠️ RETRY — Attempt {{ attempt_number }} of {{ max_retries }}
 
 This task failed on previous attempts. Fix all issues from previous feedback before declaring done.
+Run `git diff` first to inspect previously rejected edits, then correct the implementation according to review findings.
 
 {{ previous_feedback }}
 {% endif %}
@@ -54,7 +50,6 @@ This task failed on previous attempts. Fix all issues from previous feedback bef
 ## Instructions
 1. Implement the task end-to-end for code changes only.
 2. Keep changes scoped to this task.
-3. You are part of the coding step only. Testing and verification are handled by separate ralph-loop stages/agents.
+3. Current flow is `coder -> reviewer -> update -> commit`; do not invent or assume extra pipeline stages.
 4. Use only the capabilities explicitly listed above; if none are listed, do not assume MCP/browser tooling is available.
-5. During `code`, do not run tests or visual verification tooling (for example: `jest`, `tsc`, `playwright`, screenshot checks, or `visual_verify` commands).
-6. `verify_commands` are executed by the ralph-loop `verify` step on the host. During `code`, do not run host-only commands such as `docker` or `docker compose` from inside the coding container.
+5. Do not run host-only commands such as `docker` or `docker compose` from inside the coding container unless the task explicitly requires it.

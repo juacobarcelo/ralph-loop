@@ -33,7 +33,6 @@ Schema:
             "code": ["string"],
             "review": ["string"]
           },
-          "files_to_touch": ["string"],
           "files_not_to_touch": ["string"],
           "constraints": ["string"],
           "reference_impl": "string|null"
@@ -71,6 +70,7 @@ Rules:
 - If a task requires runtime/service/browser review, include the relevant capability IDs in `agent_capabilities.review`.
 - If additional directives conflict with inferred hints, additional directives take precedence.
 - Output valid JSON with double quotes only.
+- `files_to_touch` is deprecated in the unified operational flow; do not emit or rely on it.
 
 {% if project_instructions %}
 Project instructions:

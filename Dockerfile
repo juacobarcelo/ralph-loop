@@ -10,11 +10,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     rm -f /etc/apt/keyrings/nodesource.gpg && \
     rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g chrome-devtools-mcp
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    NODE_PATH=/usr/lib/node_modules
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g chrome-devtools-mcp playwright@1.58.0
 
 COPY pyproject.toml README.md LICENSE /app/
 COPY ralph_loop/ /app/ralph_loop/
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN pip install --no-cache-dir "/app[visual]" && \
     rm -f /etc/apt/sources.list.d/nodesource* && \
     mkdir -p /ms-playwright && \
